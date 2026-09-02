@@ -1,0 +1,9 @@
+[Unit]
+Description=Animal Story Automation - database backup
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/youtube-automation
+ExecStart=%h/Projects/youtube-automation/scripts/backup.sh
+Nice=19
+IOSchedulingClass=idle

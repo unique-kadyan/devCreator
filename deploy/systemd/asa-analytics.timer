@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily analytics snapshot
+
+[Timer]
+# YouTube Analytics lags up to 48h; once a day is as often as it is worth asking.
+OnCalendar=*-*-* 06:30:00
+RandomizedDelaySec=900
+Persistent=true
+Unit=asa-analytics.service
+
+[Install]
+WantedBy=timers.target

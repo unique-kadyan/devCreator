@@ -1,0 +1,28 @@
+config/config.yaml
+config/.env
+config/.env.*
+!config/.env.example
+data/
+logs/
+models/
+assets/music/*
+assets/sfx/*
+assets/characters/*
+assets/backgrounds/*
+!assets/**/.gitkeep
+.venv/
+__pycache__/
+*.pyc
+
+# OAuth tokens: never, under any circumstances, in version control.
+config/youtube_token.json
+config/*token*.json
+*.credentials.json
+
+# Build and tooling noise
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/

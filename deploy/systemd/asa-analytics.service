@@ -1,0 +1,11 @@
+[Unit]
+Description=Animal Story Automation - pull analytics and recompute strategy
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/youtube-automation
+ExecStart=%h/Projects/youtube-automation/.venv/bin/asa analytics
+Nice=15
+TimeoutStartSec=1800
+Environment=PYTHONUNBUFFERED=1

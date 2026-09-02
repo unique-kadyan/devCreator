@@ -1,0 +1,237 @@
+# animal-story-automation — example configuration
+# Copy to config/config.yaml (gitignored) and edit. Secrets go in config/.env, never here.
+
+channel:
+  name: "DevCreator"
+  # Read docs/05-COMPLIANCE.md §2 before setting this. There is no default on purpose.
+  made_for_kids: false
+  audience: "teens and adults; animal characters, adult-shaped stories"
+  disclose_synthetic: true          # over-disclose by policy
+  category_id: 1                    # 1 = Film & Animation
+  default_playlist_id: null
+  language: "en"
+
+  # Hashtags. Two YouTube behaviours drive the shape of this block:
+  #   * only the FIRST THREE hashtags in the description render above the video title, so
+  #     `lead` is what viewers actually see - keep it to three and make one of them the
+  #     channel's own, because that is the one that builds a cluster and earns subs;
+  #   * a description carrying more than FIFTEEN hashtags has ALL of them ignored, so the
+  #     merge in publish/metadata.py caps hard rather than trimming.
+  # Every hashtag here must be true of the videos. Irrelevant tags chasing reach are a
+  # spam-policy problem, not a growth tactic - see docs/05-COMPLIANCE.md.
+  # NOTE: made_for_kids is false and the audience is teens/adults, so nothing in this list
+  # signals "for children" - a #KidsCartoon here would contradict the audience declaration.
+  hashtags:
+    lead: ["Animation", "AnimalStories", "DevCreator"]
+    evergreen:
+      - "AnimatedShort"
+      - "ShortFilm"
+      - "StoryTime"
+      - "CartoonStory"
+      - "TalkingAnimals"
+      - "IndieAnimation"
+      - "AnimatedStory"
+
+  # Appended just above the sign-off. Keep any promise here one the schedule can keep -
+  # production.max_videos_per_week is a ceiling, not a commitment, so do not say "weekly".
+  cta: "If you enjoyed this, subscribe - there is another animal story on the way."
+
+production:
+  max_videos_per_week: 3            # a ceiling, not a target. See docs/05 §4.
+  target_minutes: 7
+  fps: 24
+  resolution: [1920, 1080]
+  render_concurrency: 1
+  render_workers: 6
+  crf: 20             # x264 + compositor saturate this CPU
+  network_concurrency: 3
+  auto_publish: false
+  auto_publish_after_approvals: 20               # stays false until ~20 clean manual approvals
+  privacy_on_upload: "private"      # unaudited API projects are forced to private anyway
+
+providers:
+  llm:
+      # Ordered buffer. Every entry is a real no-card free tier; a provider with no key in
+      # config/.env is skipped silently, so the buffer degrades rather than breaking.
+      # Within openrouter_free the ModelRouter walks EVERY free model before giving up.
+      chain: [openrouter_free, groq_free, gemini_free, cloudflare_free, huggingface, local_llamacpp]
+  
+      openrouter_free:
+        base_url: "https://openrouter.ai/api/v1"
+        # Pinned hints only - the router discovers the live :free roster itself and learns
+        # which models actually work. Verified 2026-09-01: 5 of 7 free models 429'd inside
+        # one minute, so a static list is not a dependency you can build on.
+        models:
+          story: ["minimax/minimax-m3:free", "z-ai/glm-5.2:free", "google/gemma-4-31b-it:free"]
+          cheap: ["minimax/minimax-m3:free", "google/gemma-4-26b-a4b-it:free"]
+        avoid_for_structured_output:
+          - "nvidia/nemotron-3.5-lightning:free"   # returns chain-of-thought, not bare JSON
+        rpm: 20                       # verified 2026-09-01
+        rpd: 50                       # 50 under $10 lifetime credit; set 1000 after
+        max_tokens: 4096
+        temperature: 0.9
+  
+      groq_free:
+        # Verified 2026-09-01: 30 RPM / 6,000 TPM / 14,400 requests-per-day, no card.
+        # 6k TPM is the real binder for long outputs, so Groq is best for `cheap` roles.
+        base_url: "https://api.groq.com/openai/v1"
+        api_key_env: GROQ_API_KEY
+        models: []                    # fill from https://console.groq.com/docs/models
+        rpm: 30
+        rpd: 14400
+  
+      gemini_free:
+        # Google AI Studio, OpenAI-compatible endpoint. Free tier exists and needs no card,
+        # but published per-model limits conflict between sources - check YOUR limits in
+        # AI Studio and set rpd accordingly. NEEDS VERIFICATION per account.
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+        api_key_env: GEMINI_API_KEY
+        models: []
+        rpm: 10
+        rpd: 250
+  
+      cloudflare_free:
+        # Workers AI: 10,000 Neurons/day shared across all models (verified 2026-09-01).
+        # base_url must include your account id.
+        base_url: ""                  # https://api.cloudflare.com/client/v4/accounts/<ID>/ai/v1
+        api_key_env: CLOUDFLARE_API_TOKEN
+        models: []
+        rpd: 1000
+  
+      huggingface:
+        base_url: "https://router.huggingface.co/v1"
+        api_key_env: HF_TOKEN
+        models: []                    # optional text fallback; HF is primarily the image path
+        monthly_credit_budget: 0      # unpublished by HF - set from settings/billing
+  
+      local_llamacpp:
+        # Terminal fallback: no quota, no network, ~5-10 tok/s on this CPU.
+        model_path: "models/qwen3-4b-instruct-q4_k_m.gguf"
+        threads: 8
+        ctx: 8192
+  image:
+    chain: [huggingface, pollinations, procedural]
+    huggingface:
+      # MUST go through huggingface_hub.InferenceClient(provider="auto").
+      # Verified 2026-09-01: the hf-inference provider returns 410 for this model and
+      # /v1/images/generations returns 404. Live providers: nscale, fal-ai, wavespeed.
+      client: "huggingface_hub"
+      provider: "auto"
+      models:
+        - "black-forest-labs/FLUX.1-schnell"   # Apache-2.0; 5.7s @ 1024x576 (measured)
+        - "Tongyi-MAI/Z-Image-Turbo"
+        - "Qwen/Qwen-Image"                    # Apache-2.0; better in-image text
+        - "stabilityai/stable-diffusion-xl-base-1.0"
+      size: [1024, 576]             # upscale locally; camera pushes in on the 2x plate
+      negative_hints: "no characters, no text, no signage text, no watermark"
+      monthly_credit_budget: 0      # still unpublished by HF - set from settings/billing
+    pollinations:
+      enabled: false
+      backgrounds_only: true        # never character sheets — rights are unclear
+    procedural:
+      palettes: "assets/brand/palettes.json"
+
+  tts:
+    chain: [kokoro_local, piper_local]
+    kokoro_local:
+      model: "hexgrad/Kokoro-82M"   # Apache-2.0
+      sample_rate: 24000
+      narrator_voice: "bm_fable"
+    piper_local:
+      voices_dir: "models/piper"
+      # Each voice has its own licence. Record it in the licenses table before shipping.
+
+  sfx:
+    chain: [local_library, freesound]
+    freesound:
+      rpm: 60                       # verified 2026-09-01
+      rpd: 2000
+      allowed_licenses: ["Creative Commons 0", "Attribution"]
+    local_library: { dir: "assets/sfx" }
+
+  music:
+    chain: [local_library]
+    local_library:
+      dir: "assets/music"
+      require_license_row: true     # hard gate
+
+research:
+  schedule: "0 5 * * *"
+  # reddit needs manual Reddit app approval (2-4 weeks) - enable it only once approved
+  collectors: [rss, wikipedia, seasonal, youtube_search]
+  youtube_search_calls_per_day: 4   # 100 units each; unaudited cap is 100 calls/day
+  candidates_per_run: 20
+  dedupe_threshold: 0.86
+  weights:                          # tuned by analytics/feedback.py; edit freely
+    trend: 0.15
+    search: 0.12
+    competition: 0.13
+    emotional: 0.15
+    entertainment: 0.10
+    story: 0.15
+    thumbnail: 0.10
+    long_form: 0.10
+  cooldowns:
+    same_animal_within: 3
+    same_archetype_within: 4
+
+story:
+  max_new_characters_per_story: 2
+  similarity_block: 0.90
+  similarity_flag: 0.82
+  archetypes: [underdog, trickster, redemption, mystery, friendship, survival, comedy, family]
+
+animation:
+  parallax_factors: { far: 0.3, mid: 0.6, near: 1.0 }
+  idle_bob_hz: 0.5
+  blink_mean_interval_s: 4.0
+  lipsync: "amplitude"              # amplitude | forced_alignment
+  camera_ease: "in_out"
+
+audio:
+  target_lufs: -14.0
+  true_peak_db: -1.0
+  voice_lufs: -16.0
+  music_lufs: -30.0
+  sfx_lufs: -22.0
+  duck_db: -12.0
+
+subtitles:
+  formats: [srt, vtt]
+  burn_in: false
+  font: "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+  size_px: 56
+  max_chars_per_line: 32
+  vertical_position: 0.78
+
+thumbnail:
+  variants: 6
+  min_face_height_ratio: 0.45
+  max_words: 5
+
+runtime:
+  retry:
+    network:  { attempts: 5, base_delay_s: 2,  max_delay_s: 120 }
+    llm:      { attempts: 3, base_delay_s: 5,  max_delay_s: 60 }
+    render:   { attempts: 2, base_delay_s: 10, max_delay_s: 60 }
+  timeouts_s:
+    story: 300
+    art: 900
+    voice: 1800
+    animate: 5400
+    assemble: 3600
+    upload: 3600
+  notify:
+    driver: "dashboard"             # dashboard | ntfy | webhook | none
+    url: null
+
+dashboard:
+  host: "127.0.0.1"
+  port: 8420
+
+paths:
+  db: "data/asa.db"
+  cache: "data/cache"
+  work: "data/work"
+  out: "data/out"
+  logs: "logs"

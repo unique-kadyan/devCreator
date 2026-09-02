@@ -1,0 +1,26 @@
+services:
+  dashboard:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    command: ["uvicorn", "asa.dashboard.app:app", "--host", "0.0.0.0", "--port", "8420"]
+    ports: ["127.0.0.1:8420:8420"]     # localhost only — never expose this
+    env_file: [../config/.env]
+    volumes:
+      - ../config:/app/config:ro
+      - ../data:/app/data
+      - ../assets:/app/assets
+      - ../logs:/app/logs
+    restart: unless-stopped
+
+  runner:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    env_file: [../config/.env]
+    volumes:
+      - ../config:/app/config:ro
+      - ../data:/app/data
+      - ../assets:/app/assets
+      - ../logs:/app/logs
+      - ../models:/app/models:ro
+    deploy:
+      resources:
+        limits: { cpus: "6.0" }        # leave 2 threads for the human using this laptop
+    restart: "no"                      # driven by the host timer, not by Docker

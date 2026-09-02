@@ -1,0 +1,13 @@
+[Unit]
+Description=Advance the animation pipeline periodically
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=20min
+# Spread the load if several timers would otherwise fire together.
+RandomizedDelaySec=180
+Persistent=true
+Unit=asa-run.service
+
+[Install]
+WantedBy=timers.target

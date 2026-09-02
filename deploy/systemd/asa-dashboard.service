@@ -1,0 +1,15 @@
+[Unit]
+Description=Animal Story Automation - approval dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/youtube-automation
+ExecStart=%h/Projects/youtube-automation/.venv/bin/asa dashboard
+Restart=on-failure
+RestartSec=10
+Nice=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

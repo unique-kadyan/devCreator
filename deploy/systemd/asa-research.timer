@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily topic research
+
+[Timer]
+OnCalendar=*-*-* 05:00:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=asa-research.service
+
+[Install]
+WantedBy=timers.target

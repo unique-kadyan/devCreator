@@ -1,0 +1,17 @@
+[Unit]
+Description=Animal Story Automation - advance one pipeline job
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/youtube-automation
+ExecStart=%h/Projects/youtube-automation/.venv/bin/asa run --max-jobs 1
+# Rendering pins every core. Without these the desktop is unusable for ~18 minutes.
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=40
+TimeoutStartSec=10800
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=1
+StandardOutput=journal
+StandardError=journal

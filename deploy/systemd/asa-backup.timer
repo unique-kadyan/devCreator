@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly database backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+Unit=asa-backup.service
+
+[Install]
+WantedBy=timers.target
