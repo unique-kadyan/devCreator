@@ -101,10 +101,17 @@ class Context:
     @cached_property
     def youtube(self):
         from ..publish.youtube import YouTubeClient
+        # YT_TOKEN_PATH is documented in config/.env.example and was previously ignored
+        # here, which silently parked the refresh token in config/ next to .env instead of
+        # the 0700 data/secrets/ directory the project creates for it. Relative values
+        # resolve against the project root so the setting cannot depend on the cwd.
+        raw = self.cfg.secret("YT_TOKEN_PATH", required=False) or "data/secrets/yt_token.json"
+        token = Path(raw)
+        if not token.is_absolute():
+            token = self.cfg.root / token
         return YouTubeClient(self.cfg.secret("YT_CLIENT_ID", required=False),
                              self.cfg.secret("YT_CLIENT_SECRET", required=False),
-                             self.cfg.root / "config" / "youtube_token.json",
-                             quota=self.quota)
+                             token, quota=self.quota)
 
     # ------------------------------------------------------------------ paths
 
