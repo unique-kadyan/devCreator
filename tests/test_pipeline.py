@@ -164,11 +164,35 @@ def test_scene_coerces_common_model_mistakes():
     assert s.camera.move == "push_in" and s.camera.from_shot == "wide"
 
 
-def test_scene_still_rejects_unrenderable_values():
+def test_scene_never_yields_an_unrenderable_value():
+    """Unrenderable input is coerced to something the renderer can execute.
+
+    This used to assert that validation RAISED. The property it was protecting - the
+    renderer never receives a move it has no implementation for - still holds, but the
+    mechanism changed deliberately: three separate stories were killed by a single
+    out-of-vocabulary word ("calm" for neutral, "worried" for scared, an invented gesture
+    name), each after two repair attempts and each one throwing away a complete story.
+    Rejecting made the model's mistake loud but very expensive. Coercing keeps the
+    vocabulary closed and logs a `vocabulary_fallback` line so the mistake stays visible.
+    """
+    from asa.media.animation.shots import CAMERA_MOVES
+
+    s = Scene.model_validate({"index": 1, "location_id": "x", "action": "a",
+                              "visual_prompt": "a place at night",
+                              "camera": {"move": "dolly_zoom_vertigo"}})
+    assert s.camera.move in CAMERA_MOVES
+    assert s.camera.move == "static", "an unmappable move must fall back to no movement"
+
+
+def test_structural_errors_are_still_rejected():
+    # Coercion applies to closed VOCABULARIES only. A malformed scene - missing required
+    # fields, out-of-range numbers - must still fail loudly.
+    with pytest.raises(Exception):
+        Scene.model_validate({"index": 1, "location_id": "x"})          # no action
     with pytest.raises(Exception):
         Scene.model_validate({"index": 1, "location_id": "x", "action": "a",
                               "visual_prompt": "a place at night",
-                              "camera": {"move": "dolly_zoom_vertigo"}})
+                              "staging": {"c": {"x": 5.0}}})            # x out of range
 
 
 def test_scene_list_requires_contiguous_indices():

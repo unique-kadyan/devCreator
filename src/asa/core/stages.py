@@ -91,7 +91,8 @@ def generate_story(ctx, job: dict) -> dict:
     gen = StoryGenerator(
         ctx.llm, target_minutes=ctx.target_minutes,
         max_new_characters=int(ctx.cfg.get("story.max_new_characters_per_story", 2)),
-        archetypes=ctx.cfg.get("story.archetypes"))
+        archetypes=ctx.cfg.get("story.archetypes"),
+        language=str(ctx.cfg.get("channel.language", "en")))
     story = gen.generate(
         topic=topic, keywords=keywords, available_characters=available,
         recent_signatures=recent_beat_signatures(ctx.db),
@@ -121,10 +122,16 @@ def generate_story(ctx, job: dict) -> dict:
             "repairs": story.repairs, "models": story.model_ids}
 
 
+def _cinematic(ctx) -> bool:
+    return str(ctx.cfg.get("production.render_mode", "puppet")).lower() == "cinematic"
+
+
 @stage("art", "SCRIPT_GENERATED", "ART_READY", "art")
 def generate_art(ctx, job: dict) -> dict:
     from ..scenes.persist import load_scenes
     scenes = load_scenes(ctx.db, job["story_id"])
+    if _cinematic(ctx):
+        return _generate_scene_images(ctx, job, scenes)
     made, reused = 0, 0
     for location_id in dict.fromkeys(s["location_id"] for s in scenes):
         prompt = next(s["visual_prompt"] for s in scenes if s["location_id"] == location_id)
@@ -137,6 +144,35 @@ def generate_art(ctx, job: dict) -> dict:
         con.execute("UPDATE scenes SET status = 'art_ready' WHERE story_id = ?",
                     (job["story_id"],))
     return {"locations": made + reused, "generated": made, "cached": reused}
+
+
+def _generate_scene_images(ctx, job: dict, scenes: list[dict]) -> dict:
+    """One photorealistic frame per scene, characters and setting together.
+
+    Keyed per SCENE, not per location: two scenes in the same classroom are different
+    moments and need different images. That costs one image call per scene rather than one
+    per location, which the cache absorbs on re-runs.
+    """
+    from ..media.images.scene_image import CINEMATIC_NEGATIVE, scene_prompt
+    from ..scenes.persist import load_story
+    story = load_story(ctx.db, job["story_id"])
+    cast_by_id = {c["character_id"]: c for c in story["cast"]}
+    out_dir = ctx.paths_for(job["id"]).work / "scene_images"
+    region = ctx.cfg.get("channel.region_hint") or None
+
+    made = reused = 0
+    for sc in scenes:
+        kwargs = {"region_hint": region} if region else {}
+        prompt = scene_prompt(sc, cast_by_id, **kwargs)
+        plate = ctx.images.scene(sc["idx"], prompt, out_dir, CINEMATIC_NEGATIVE)
+        reused += int(plate.cached)
+        made += int(not plate.cached)
+        with tx(ctx.db) as con:
+            con.execute("UPDATE scenes SET status = 'art_ready', plate_path = ? "
+                        "WHERE id = ?", (str(plate.path), sc["id"]))
+    log.info("scene_images_ready", scenes=len(scenes), generated=made, cached=reused)
+    return {"mode": "cinematic", "scenes": len(scenes), "generated": made,
+            "cached": reused}
 
 
 @stage("audio", "ART_READY", "AUDIO_READY", "voice")
@@ -154,6 +190,48 @@ def generate_audio(ctx, job: dict) -> dict:
     return {"scenes": len(audio.scenes), "total_s": round(audio.total_s, 2)}
 
 
+def _animate_cinematic(ctx, job: dict, scenes: list[dict], audio) -> dict:
+    """Camera moves over the generated frames. No rig, no lip-sync.
+
+    The scripted camera_move is honoured so the story's shot language survives, and a
+    "static" scene still gets a 2% drift - a truly frozen frame under narration reads as a
+    slideshow, or as a video that has stalled.
+    """
+    from ..assemble.cinematic import render_still
+    from ..assemble.video import _sha
+    paths = ctx.paths_for(job["id"])
+    by_scene = {a.scene_id: a for a in audio.scenes}
+    out_dir = paths.scenes
+    out_dir.mkdir(parents=True, exist_ok=True)
+    crf = int(ctx.cfg.get("production.crf", 20))
+
+    rendered, total = 0, 0.0
+    for sc in scenes:
+        image = Path(sc["plate_path"] or "")
+        if not image.exists():
+            raise ValidationError(
+                f"scene {sc['idx']} has no generated image; re-run the art stage")
+        dest = out_dir / f"scene_{sc['idx']:03d}.mp4"
+        duration = by_scene[sc["id"]].duration_s
+        # Resume, same contract as the puppet renderer: an unchanged scene is not re-cut.
+        if dest.exists() and sc.get("render_sha256") and _sha(dest) == sc["render_sha256"]:
+            log.info("scene_render_reused", scene=sc["idx"])
+            total += duration
+            continue
+        stats = render_still(image, dest, duration_s=duration, fps=ctx.fps,
+                             size=ctx.resolution,
+                             camera_move=sc.get("camera_move") or "static", crf=crf)
+        with tx(ctx.db) as con:
+            con.execute("UPDATE scenes SET render_path = ?, render_sha256 = ?, "
+                        "status = 'rendered' WHERE id = ?",
+                        (str(dest), _sha(dest), sc["id"]))
+        log.info("scene_rendered", scene=sc["idx"], **stats)
+        rendered += 1
+        total += duration
+    return {"mode": "cinematic", "scenes": len(scenes), "rendered": rendered,
+            "seconds": round(total, 1)}
+
+
 @stage("animate", "AUDIO_READY", "SCENES_RENDERED", "animate")
 def animate(ctx, job: dict) -> dict:
     from ..assemble.video import render_scenes
@@ -162,6 +240,8 @@ def animate(ctx, job: dict) -> dict:
     story = load_story(ctx.db, job["story_id"])
     scenes = load_scenes(ctx.db, job["story_id"])
     audio = ctx.load_audio(job["id"], scenes, story["cast"])
+    if _cinematic(ctx):
+        return _animate_cinematic(ctx, job, scenes, audio)
     cast_dirs = {c["character_id"]: ctx.assets / "characters" / c["character_id"]
                  for c in story["cast"]}
     plates = {s["location_id"]: ctx.assets / "backgrounds" / s["location_id"] / "plate.png"

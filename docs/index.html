@@ -58,8 +58,11 @@
   stated plainly rather than left to a review step that does not happen.
 </p>
 <ul>
-  <li><strong>Volume is capped in configuration</strong> at three videos per week. The cap
-    is enforced by the application, not by convention.</li>
+  <li><strong>Upload volume is bounded by the YouTube API quota</strong> granted to this
+    project. At the current allocation of 10,000 units per day, and 2,050 units per
+    published episode (insert, thumbnail and caption track), that is about four uploads in
+    a day. The application stops before exceeding the allocation rather than making calls
+    it knows will be refused.</li>
   <li><strong>Every episode passes automated quality control before upload</strong>, and a
     failure stops the upload rather than warning about it. The checks are mechanical:
     integrated loudness and true peak, container duration against the audio timeline,

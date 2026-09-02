@@ -55,7 +55,13 @@ class ThumbVariant:
 
 
 def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
-    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    # Noto Devanagari first, and not only for Hindi: DejaVu has no Devanagari glyphs at
+    # all and renders the script as .notdef boxes - identical output to CJK, verified by
+    # pixel comparison - so a Hindi thumbnail would ship as a row of empty rectangles.
+    # Noto covers Latin too, so one font serves both languages and the order is safe.
+    for p in ("/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+              "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
               "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
         if Path(p).exists():
             return ImageFont.truetype(p, size)

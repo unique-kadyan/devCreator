@@ -12,6 +12,7 @@ own titles produces confident nonsense; a deterministic scorer at least fails pr
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -122,7 +123,14 @@ def normalise_hashtag(raw: str) -> str:
     into CamelCase rather than truncated - dropping the tail silently changes what the
     video is filed under.
     """
-    cleaned = re.sub(r"[^0-9A-Za-z ]+", " ", str(raw).replace("#", " "))
+    # Keep letters, digits and combining marks from ANY script, not just ASCII. The old
+    # [^0-9A-Za-z ] filter erased Devanagari entirely - "कहानी" normalised to "" - so a
+    # Hindi channel would have shipped every video with no hashtags and nothing in the logs
+    # to say why. Combining marks (category M*) carry the vowel signs in Indic scripts and
+    # are not optional decoration: dropping them changes the word.
+    cleaned = "".join(
+        ch if (ch.isalnum() or unicodedata.category(ch).startswith("M")) else " "
+        for ch in str(raw).replace("#", " "))
     words = cleaned.split()
     if not words:
         return ""
@@ -213,7 +221,11 @@ def part_description(base: str, part: int, total: int,
 def clean_tags(tags: list[str]) -> list[str]:
     seen, out, total = set(), [], 0
     for raw in tags:
-        t = re.sub(r"[^a-z0-9 \-]", "", raw.lower()).strip()
+        # Same reason as normalise_hashtag: an ASCII-only filter silently deletes every
+        # non-Latin tag. Hyphens and spaces are kept because YouTube tags allow them.
+        t = "".join(
+            ch if (ch.isalnum() or ch in " -" or unicodedata.category(ch).startswith("M"))
+            else "" for ch in raw.lower()).strip()
         if len(t) < 3 or t in seen:
             continue
         if total + len(t) + 1 > MAX_TAGS_CHARS:

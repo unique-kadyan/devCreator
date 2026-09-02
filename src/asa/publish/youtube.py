@@ -43,7 +43,7 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload",
 COST = {"videos.insert": 1600, "thumbnails.set": 50, "captions.insert": 400,
         "videos.list": 1, "videos.update": 50, "search.list": 100,
         "playlistItems.insert": 50}
-DAILY_UNITS = 10_000
+DAILY_UNITS = 90_000
 CHUNK = 4 * 1024 * 1024
 
 

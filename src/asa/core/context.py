@@ -79,13 +79,18 @@ class Context:
 
     @cached_property
     def tts(self):
-        from ..media.tts.kokoro_tts import KokoroTTS
-        return KokoroTTS()
+        from ..media.tts.factory import build_tts_chain
+        # A chain, not a single provider: `providers.tts.chain` has been in config since
+        # the start and was read by nothing. It matters now that a hosted voice leads it -
+        # Kokoro underneath is what keeps a render going when the network one stops.
+        lang = str(self.cfg.get("channel.language", "en")).lower()
+        return build_tts_chain(self.cfg, language=lang)
 
     @cached_property
     def characters(self):
         from ..characters.factory import CharacterFactory
-        return CharacterFactory(self.db, self.assets)
+        return CharacterFactory(self.db, self.assets,
+                                language=str(self.cfg.get("channel.language", "en")))
 
     @cached_property
     def sfx(self):

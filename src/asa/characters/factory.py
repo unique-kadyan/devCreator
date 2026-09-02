@@ -38,7 +38,25 @@ VOICE_POOL: dict[str, list[str]] = {
                     "af_nicole", "bm_daniel"],
     "elder":       ["bm_fable", "bm_george", "am_santa", "af_nicole", "am_fenrir"],
 }
+
+# Kokoro ships only FOUR Hindi voices - hf_alpha, hf_beta, hm_omega, hm_psi - against the
+# 28 English ones, so every age band reuses the same four and the ensemble is separated by
+# pitch and rate instead of by preset. That is why AGE_PITCH matters more here: with a pool
+# this small, two characters sharing a preset AND a pitch really are indistinguishable.
+VOICE_POOL_HI: dict[str, list[str]] = {
+    "child":       ["hf_beta", "hf_alpha", "hm_psi"],
+    "teen":        ["hf_alpha", "hm_psi", "hf_beta"],
+    "young_adult": ["hf_alpha", "hm_omega", "hf_beta", "hm_psi"],
+    "adult":       ["hm_omega", "hf_alpha", "hm_psi", "hf_beta"],
+    "elder":       ["hm_omega", "hf_beta", "hm_psi"],
+}
+VOICE_POOLS: dict[str, dict[str, list[str]]] = {"en": VOICE_POOL, "hi": VOICE_POOL_HI}
+
 NARRATOR_VOICE = "bm_fable"
+NARRATOR_VOICE_HI = "hm_omega"
+
+# Kokoro selects its phonemiser by a single-letter code, not by an ISO language tag.
+KOKORO_LANG_CODES = {"en": "b", "hi": "h"}
 
 # Age changes pitch as much as species does; a child bear is still higher than an adult one.
 AGE_PITCH = {"child": 3.0, "teen": 1.5, "young_adult": 0.0, "adult": -0.5, "elder": -1.5}
@@ -62,7 +80,27 @@ class BuiltCharacter:
 
 
 def slug(name: str, species: str) -> str:
-    base = re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_") or "char"
+    """The single canonical character id. ASCII only, and never ambiguous.
+
+    ASCII because this id becomes a directory name, a database key and part of an image
+    prompt; a Devanagari path is a portability problem waiting to happen.
+
+    But stripping non-ASCII is not enough on its own. Every Hindi name reduces to the empty
+    string, so a bare fallback made "श्यामा the cow" and "मोती the cow" BOTH `char_cow` -
+    two different characters silently merged into one row, one puppet and one voice. When
+    nothing survives transliteration the id carries a short stable hash of the original
+    name instead, so distinct names stay distinct and the same name always resolves to the
+    same id.
+
+    This function is the only slug in the codebase on purpose: story/generator.py had its
+    own copy using `str.isalnum()`, which keeps Devanagari, so the two disagreed on Hindi
+    names. The story then referenced a character id the factory had never built and the
+    dialogue insert failed on a foreign key.
+    """
+    raw = (name or "").strip()
+    base = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    if not base:
+        base = "c" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
     return f"{base}_{species}"
 
 
@@ -71,14 +109,16 @@ def _stable_int(*parts: str) -> int:
 
 
 def cast_voice(character_id: str, age_band: str, species: str, presentation: str,
-               taken: set[str] | None = None) -> tuple[str, float, float]:
+               taken: set[str] | None = None,
+               language: str = "en") -> tuple[str, float, float]:
     """Pick (voice_id, pitch_semitones, rate) deterministically from the character id.
 
     `taken` lets an ensemble avoid doubling up: two characters sharing a preset AND a pitch
     are genuinely hard to tell apart in a two-hander scene.
     """
     taken = taken or set()
-    pool = VOICE_POOL.get(age_band, VOICE_POOL["young_adult"])
+    pools = VOICE_POOLS.get(language, VOICE_POOL)
+    pool = pools.get(age_band, pools["young_adult"])
     pres = (presentation or "").lower()
     # Presentation is free text on purpose. Only steer when the character says so; never
     # infer a voice from a name.
@@ -138,9 +178,12 @@ class CharacterFactory:
     """Builds puppets and registers them. Idempotent: rebuilding an existing character
     reuses its id, palette and voice unless `force` is set."""
 
-    def __init__(self, db: Path, assets_root: Path):
+    def __init__(self, db: Path, assets_root: Path, language: str = "en"):
         self.db = Path(db)
         self.root = Path(assets_root)
+        # Voice casting is per-channel-language: the Hindi pool is four presets, the
+        # English one twenty-eight, so the pools are not interchangeable.
+        self.language = (language or "en").lower()
 
     # ------------------------------------------------------------------ queries
 
@@ -177,7 +220,8 @@ class CharacterFactory:
         palette = palette_from_spec(spec.fur_hex, spec.accent_hex, spec.eye_hex,
                                     spec.clothing_hex)
         voice, pitch, rate = cast_voice(cid, spec.age_band, spec.species,
-                                        spec.presentation, self.taken_voices())
+                                        spec.presentation, self.taken_voices(),
+                                        language=self.language)
 
         out_dir = self.root / "characters" / cid
         rig = AnimalPuppet(cid, palette, spec.species).build(out_dir)

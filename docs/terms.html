@@ -76,7 +76,9 @@
   approving each episode. The following limits are enforced by the application itself:
 </p>
 <ul>
-  <li>A ceiling of three published videos per week.</li>
+  <li>Upload volume bounded by the YouTube API quota granted to this project - about four
+    published episodes per day at the current allocation. The application halts before
+    exceeding it.</li>
   <li>Automated quality control on every episode before upload. A failed check stops the
     upload; it does not merely record a warning.</li>
   <li>Automatic rejection of research topics concerning real people coming to harm, real

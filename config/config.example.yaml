@@ -9,7 +9,10 @@ channel:
   disclose_synthetic: true          # over-disclose by policy
   category_id: 1                    # 1 = Film & Animation
   default_playlist_id: null
-  language: "en"
+  language: "hi"
+  # Grounding for the image model. Without it, "a street" renders as a generic western
+  # street; the model has no idea where this channel is set.
+  region_hint: "set in India, authentic Indian surroundings, Indian street furniture"
 
   # Hashtags. Two YouTube behaviours drive the shape of this block:
   #   * only the FIRST THREE hashtags in the description render above the video title, so
@@ -37,6 +40,13 @@ channel:
   cta: "If you enjoyed this, subscribe - there is another animal story on the way."
 
 production:
+  # How a scene becomes video.
+  #   cinematic - one photorealistic frame per scene from the image model, containing the
+  #               characters AND the setting, animated with a camera move. Matches the
+  #               anthropomorphic-animal look; there is no rig, so no lip-sync.
+  #   puppet    - the procedural rig: layered PNG characters composited onto an empty
+  #               background plate, with lip-sync, blinks and staging. Flat cartoon style.
+  render_mode: "cinematic"
   # Multi-part release. A story is cut into videos of roughly this length, each published
   # as its own upload in a series playlist, because a viewer who finishes a part and finds
   # the next one waiting is the viewer who subscribes. The cut is computed from MEASURED
@@ -45,7 +55,9 @@ production:
   # Set part_max_minutes to 0 to go back to one video per story.
   part_min_minutes: 2.5
   part_max_minutes: 3.0
-  max_videos_per_week: 3            # a ceiling, not a target. See docs/05 §4.
+  max_videos_per_week: 999            # internal ceiling only; the YouTube
+                                    # quota binds first at ~4 uploads/day
+                                    # (10,000 units / 2,050 per upload)
   target_minutes: 7
   fps: 24
   resolution: [1920, 1080]
@@ -62,7 +74,13 @@ providers:
       # Ordered buffer. Every entry is a real no-card free tier; a provider with no key in
       # config/.env is skipped silently, so the buffer degrades rather than breaking.
       # Within openrouter_free the ModelRouter walks EVERY free model before giving up.
-      chain: [openrouter_free, groq_free, gemini_free, cloudflare_free, huggingface, local_llamacpp]
+      # Order is preference, and it is deliberate. openrouter_free sits BEHIND the
+      # dedicated free tiers because its allowance is 50 requests/day on the no-credit
+      # plan: once that is gone every model in the pool returns 429 and walking all
+      # eighteen of them costs ~50s before the chain falls through. The providers ahead of
+      # it have daily allowances one to three orders of magnitude larger, so on a normal
+      # day the request is served before openrouter is ever tried.
+      chain: [groq_free, mistral_free, cohere_free, openrouter_free, gemini_free, cloudflare_free, huggingface, local_llamacpp]
   
       openrouter_free:
         base_url: "https://openrouter.ai/api/v1"
@@ -82,12 +100,55 @@ providers:
       groq_free:
         # Verified 2026-09-01: 30 RPM / 6,000 TPM / 14,400 requests-per-day, no card.
         # 6k TPM is the real binder for long outputs, so Groq is best for `cheap` roles.
+        # Models below were read from the live /models endpoint on this account, not copied
+        # from docs. An EMPTY list here silently disables the provider even when the key is
+        # set - the factory needs a key AND models - which is why `asa doctor` reported
+        # GROQ_API_KEY as OK while the chain logged groq_free(no key).
+        # Excluded on purpose: whisper-* (speech-to-text), canopylabs/orpheus-* (TTS),
+        # meta-llama/llama-prompt-guard-* and gpt-oss-safeguard (classifiers, not chat),
+        # allam-2-7b (Arabic-specialised).
         base_url: "https://api.groq.com/openai/v1"
         api_key_env: GROQ_API_KEY
-        models: []                    # fill from https://console.groq.com/docs/models
+        models:
+          - "openai/gpt-oss-120b"
+          - "qwen/qwen3.8-27b"
+          - "openai/gpt-oss-20b"
+          - "qwen/qwen3.6-27b"
+          - "groq/compound-mini"
         rpm: 30
         rpd: 14400
   
+      mistral_free:
+        # La Plateforme free tier ("Experiment"), OpenAI-compatible. No card. Verify your
+        # own limits at https://console.mistral.ai - the free tier is rate limited per
+        # second rather than per day, which is why rpm is set low and rpd generously.
+        base_url: "https://api.mistral.ai/v1"
+        api_key_env: MISTRAL_API_KEY
+        models:
+          # Verified against the live /models endpoint on this account, not copied from
+          # docs - "open-mistral-nemo" was in the published list and is NOT served here,
+          # and a model id that does not exist fails the call rather than being skipped.
+          - "mistral-small-latest"
+          - "ministral-14b-latest"
+          - "ministral-8b-latest"
+          - "ministral-3b-latest"
+        rpm: 30
+        rpd: 2000
+
+      cohere_free:
+        # Cohere's OpenAI compatibility layer. A TRIAL key is free and uncarded but is
+        # limited to roughly 1,000 requests per MONTH, so this sits below Mistral in the
+        # chain: it is genuine headroom for a busy day, not a daily workhorse.
+        base_url: "https://api.cohere.ai/compatibility/v1"
+        api_key_env: COHERE_API_KEY
+        models:
+          - "command-a-03-2025"
+          - "command-r-plus-08-2024"
+          - "command-r-08-2024"
+          - "command-r7b-12-2024"
+        rpm: 20
+        rpd: 900
+
       gemini_free:
         # Google AI Studio, OpenAI-compatible endpoint. Free tier exists and needs no card,
         # but published per-model limits conflict between sources - check YOUR limits in
@@ -140,7 +201,14 @@ providers:
       palettes: "assets/brand/palettes.json"
 
   tts:
-    chain: [kokoro_local, piper_local]
+    # Ordered. Sarvam is a hosted model trained on Indian languages and sounds markedly
+    # more human than Kokoro, which is 82M parameters and audibly synthetic in Hindi.
+    # Kokoro stays underneath because it needs no network and no allowance: a hosted voice
+    # that runs out mid-episode must degrade, not stop the render.
+    chain: [sarvam, kokoro_local]
+    sarvam:
+      api_key_env: SARVAM_API_KEY
+      model: "bulbul:v2"
     kokoro_local:
       model: "hexgrad/Kokoro-82M"   # Apache-2.0
       sample_rate: 24000
@@ -207,7 +275,9 @@ audio:
 subtitles:
   formats: [srt, vtt]
   burn_in: false
-  font: "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+  # Must cover the channel language. DejaVu has no Devanagari glyphs and draws
+  # empty boxes for Hindi; Noto Devanagari covers Latin as well.
+  font: "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf"
   size_px: 56
   max_chars_per_line: 32
   vertical_position: 0.78

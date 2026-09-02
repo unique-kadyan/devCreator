@@ -10,8 +10,10 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..characters.species import SPECIES_LIST
-from ..media.animation.shots import (CAMERA_MOVES, EASING, EMOTIONS, GESTURES,
-                                     SHOT_TYPES, TRANSITIONS)
+from ..media.animation.shots import (CAMERA_MOVES, CAMERA_SYNONYMS, EASING, EMOTIONS,
+                                     EMOTION_SYNONYMS, GESTURES, GESTURE_SYNONYMS,
+                                     SHOT_SYNONYMS, SHOT_TYPES, TRANSITIONS,
+                                     TRANSITION_SYNONYMS, coerce)
 
 Archetype = Literal["underdog", "trickster", "redemption", "mystery",
                     "friendship", "survival", "comedy", "family"]
@@ -102,6 +104,14 @@ class DialogueLine(BaseModel):
     line: str = Field(max_length=280)
     emotion: Emotion = "neutral"
 
+    # Same coercion as Scene.emotion. Missing it here is what failed job 3 on the very
+    # next run after Scene.emotion was fixed: the model wrote "worried" on a dialogue
+    # line rather than on the scene, and one adjective cost the whole story again.
+    @field_validator("emotion", mode="before")
+    @classmethod
+    def _coerce_emotion(cls, v):
+        return coerce(v, EMOTIONS, EMOTION_SYNONYMS, "neutral")
+
 
 class Staging(BaseModel):
     x: float = Field(ge=0.0, le=1.0)
@@ -110,12 +120,33 @@ class Staging(BaseModel):
     facing: Literal["left", "right"] = "right"
     gesture: Gesture = "idle"
 
+    # Closed vocabularies are the right design - the renderer has artwork for these poses
+    # and nothing else - but rejecting a near-miss costs the whole story. A single "calm"
+    # instead of "neutral" failed job 3 after two repair attempts, and the same class of
+    # error had already appeared as `shot` and `gesture` on earlier runs. Coercing before
+    # validation keeps the vocabulary closed while making the model's output usable.
+    @field_validator("gesture", mode="before")
+    @classmethod
+    def _coerce_gesture(cls, v):
+        return coerce(v, GESTURES, GESTURE_SYNONYMS, "idle")
+
 
 class Camera(BaseModel):
     move: CameraMove = "static"
     from_shot: ShotType = "wide"
     to_shot: ShotType | None = None
     ease: Easing = "in_out"
+
+    @field_validator("move", mode="before")
+    @classmethod
+    def _coerce_move(cls, v):
+        return coerce(v, CAMERA_MOVES, CAMERA_SYNONYMS, "static")
+
+    @field_validator("from_shot", "to_shot", mode="before")
+    @classmethod
+    def _coerce_shots(cls, v):
+        # to_shot is optional; None means "no move", which must survive coercion.
+        return None if v is None else coerce(v, SHOT_TYPES, SHOT_SYNONYMS, "wide")
 
 
 class Scene(BaseModel):
@@ -145,6 +176,21 @@ class Scene(BaseModel):
     sfx: list[str] = Field(default_factory=list)
     music_cue: str = "neutral"
     transition_in: Transition = "cut"
+
+    @field_validator("emotion", mode="before")
+    @classmethod
+    def _coerce_emotion(cls, v):
+        return coerce(v, EMOTIONS, EMOTION_SYNONYMS, "neutral")
+
+    @field_validator("shot", mode="before")
+    @classmethod
+    def _coerce_shot(cls, v):
+        return coerce(v, SHOT_TYPES, SHOT_SYNONYMS, "medium")
+
+    @field_validator("transition_in", mode="before")
+    @classmethod
+    def _coerce_transition(cls, v):
+        return coerce(v, TRANSITIONS, TRANSITION_SYNONYMS, "cut")
 
     @model_validator(mode="before")
     @classmethod

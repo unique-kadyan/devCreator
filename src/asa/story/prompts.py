@@ -17,8 +17,33 @@ def block(name: str) -> str:
     return (BLOCKS / f"{name}.md").read_text().strip()
 
 
-def system_prompt(extra: str = "") -> str:
+# Which language the audience HEARS. Only the spoken and on-screen text changes: JSON keys,
+# enum values, character ids and location ids stay ASCII, because the schema, the renderer
+# and the filesystem all key off them.
+LANGUAGE_RULES = {
+    "hi": ("WRITE IN HINDI.\n"
+           "- All `narration`, all dialogue `line` text, the story `title` and the "
+           "`description` must be in natural conversational Hindi, in Devanagari script.\n"
+           "- Everything else stays in ENGLISH and ASCII: every JSON key, every enum value "
+           "(emotion, shot, camera move, gesture, transition), every `character_id`, every "
+           "`location_id`, and every `visual_prompt`.\n"
+           "- `visual_prompt` describes a picture for an image model that only understands "
+           "English, so it must be English even though the story is Hindi.\n"
+           "- Write Hindi as people actually speak it. Everyday Hindustani, not literary "
+           "Sanskritised Hindi, and do not transliterate English sentences into "
+           "Devanagari."),
+}
+
+
+def language_rules(language: str) -> str:
+    return LANGUAGE_RULES.get((language or "en").lower(), "")
+
+
+def system_prompt(extra: str = "", language: str = "en") -> str:
     parts = [block("channel_bible"), block("safety_rules")]
+    rules = language_rules(language)
+    if rules:
+        parts.append(rules)
     if extra:
         parts.append(extra)
     parts.append("Return ONLY the requested JSON. No prose, no explanation, no markdown "

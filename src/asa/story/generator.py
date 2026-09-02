@@ -36,6 +36,16 @@ WORDS_PER_MINUTE = 150.0
 # only sees the video long after the render has been paid for.
 MIN_RUNTIME_RATIO = 0.75
 
+# How many times to ask for more material before accepting what we have. Three is measured,
+# not arbitrary: one pass took a story from 54s to 225s against a 420s target, so a single
+# pass is demonstrably not enough, and each pass costs one model call against a stage that
+# already has a 1,800s budget.
+MAX_EXPANSION_PASSES = 3
+
+# A pass that adds less than this fraction of the target has plateaued; asking again just
+# spends calls to get the same length back.
+MIN_EXPANSION_GAIN = 0.08
+
 
 @dataclass
 class GeneratedStory:
@@ -54,9 +64,14 @@ class GeneratedStory:
 
 class StoryGenerator:
     def __init__(self, chain: LLMChain, target_minutes: float = 7.0,
-                 max_new_characters: int = 1, archetypes: list[str] | None = None):
+                 max_new_characters: int = 1, archetypes: list[str] | None = None,
+                 language: str = "en"):
         self.chain = chain
         self.target_minutes = target_minutes
+        # Only the spoken text changes with language. Enum values, character ids and
+        # visual_prompt stay English/ASCII - the schema, the renderer and the image model
+        # all key off them, and a Devanagari `location_id` would reach the filesystem.
+        self.language = (language or "en").lower()
         self.max_new_characters = max_new_characters
         self.archetypes = archetypes or [
             "underdog", "trickster", "redemption", "mystery",
@@ -76,7 +91,7 @@ class StoryGenerator:
         raises ValidationError like any field validator, so a violation is *repairable*
         rather than fatal - the model gets told what it broke and tries once more.
         """
-        system = P.system_prompt(system_extra)
+        system = P.system_prompt(system_extra, language=self.language)
         c = self.chain.complete(system, user, role=role, max_tokens=max_tokens,
                                 temperature=temperature, structured=True)
         try:
@@ -194,7 +209,7 @@ class StoryGenerator:
 
     def draft(self, outline: StoryOutline) -> tuple:
         user = P.draft_prompt(outline.model_dump_json(indent=None), self.target_minutes)
-        system = P.system_prompt()
+        system = P.system_prompt(language=self.language)
         c = self.chain.complete(system, user, role="story", max_tokens=4096,
                                 temperature=0.95, structured=True)
         from ..llm.base import extract_json
@@ -225,15 +240,33 @@ class StoryGenerator:
         valid_ids = {m["id"] for m in cast}
 
         def _check(sl) -> None:
-            bad: list[str] = []
+            # An off-cast speaker is dropped, not fatal - the same treatment unknown
+            # staging ids already get below, and for the same reason: there is no puppet
+            # and no voice for a character that does not exist, so the line is unusable
+            # either way, and raising throws away every good scene alongside it. This is
+            # not hypothetical: asking for MORE scenes during expansion invites the model
+            # to invent a speaker, and one invented "old_man_mercer" across two scenes
+            # discarded a whole expansion pass and left the episode at 17% of target.
+            total = sum(len(sc.dialogue) for sc in sl.scenes)
+            dropped: list[str] = []
             for sc in sl.scenes:
+                keep = []
                 for d in sc.dialogue:
-                    if d.character_id not in valid_ids:
-                        bad.append(f"scene {sc.index} dialogue -> {d.character_id!r}")
-            if bad:
+                    if d.character_id in valid_ids:
+                        keep.append(d)
+                    else:
+                        dropped.append(f"scene {sc.index} -> {d.character_id!r}")
+                sc.dialogue = keep
+            if dropped:
+                log.warning("dialogue_dropped_off_cast", n=len(dropped), of=total,
+                            examples=dropped[:5], cast=sorted(valid_ids))
+            # Losing MOST of the dialogue means the model wrote a different story with a
+            # different cast, and salvaging that produces an incoherent episode. Repair is
+            # the right answer there, so this still raises.
+            if total and len(dropped) > total * 0.5:
                 raise ValidationError(
-                    "dialogue names characters that are not in the cast: "
-                    + "; ".join(bad[:8])
+                    f"{len(dropped)} of {total} dialogue lines name characters outside "
+                    f"the cast: " + "; ".join(dropped[:8])
                     + f". Every dialogue character_id must be exactly one of "
                       f"{sorted(valid_ids)}.")
             spoken = sum(len(sc.dialogue) for sc in sl.scenes)
@@ -271,7 +304,13 @@ class StoryGenerator:
         for sc in scenes.scenes:
             n += len((sc.narration or "").split())
             for line in sc.dialogue:
-                n += len((getattr(line, "text", "") or "").split())
+                # The field on DialogueLine is `line`. This read `text` and so counted
+                # zero for every story ever - the estimate was always 0, the shortfall
+                # check always tripped, and every story paid for a pointless expansion
+                # pass. `text` is kept as a fallback only because the repair path can hand
+                # back loosely-shaped objects.
+                spoken = getattr(line, "line", None) or getattr(line, "text", "") or ""
+                n += len(spoken.split())
         return n
 
     def estimated_runtime_s(self, scenes: SceneList) -> float:
@@ -280,16 +319,31 @@ class StoryGenerator:
     def _expand_prompt(self, user: str, scenes: SceneList, want_s: float) -> str:
         have_s = self.estimated_runtime_s(scenes)
         need_words = int(max(0.0, want_s - have_s) * WORDS_PER_MINUTE / 60.0)
+        have_scenes = len(scenes.scenes)
+        # Scenes are capped at 12 seconds of speech before they stop reading as one beat,
+        # so a target that needs more than the current scenes can carry has to be met by
+        # ADDING scenes. Forbidding that outright is why one pass stalled at 225s of a
+        # 420s target: nine scenes were being asked to hold 47 seconds of dialogue each.
+        want_scenes = max(have_scenes, min(40, int(want_s / 12)))
+        if want_scenes > have_scenes + 1:
+            shape = (f"Expand to about {want_scenes} scenes, up from {have_scenes}. Add the "
+                     f"new scenes BETWEEN existing ones to show beats the story currently "
+                     f"skips over - a journey that is summarised, a reaction that happens "
+                     f"off-screen, a moment of difficulty before it is resolved. Keep every "
+                     f"existing scene, in order.")
+        else:
+            shape = ("Keep the same scenes, in the same order. Deepen what is already "
+                     "there - more of what the characters say to each other, more of what "
+                     "the narrator observes.")
         return (f"{user}\n\n---\nYour previous reply was structurally valid but far too "
-                f"SHORT. It contains {self.spoken_words(scenes)} spoken words, about "
-                f"{have_s / 60:.1f} minutes of narration and dialogue, against a target of "
-                f"{want_s / 60:.1f} minutes.\n\n"
-                f"Return the SAME story, same scene order, same characters and same "
-                f"locations, with roughly {need_words} MORE words of narration and "
-                f"dialogue distributed across the existing scenes. Deepen what is already "
-                f"there - more of what characters say to each other, more of what the "
-                f"narrator observes. Do NOT invent new plot, new characters or new "
-                f"locations, and do NOT pad with repetition.\n\n"
+                f"SHORT. It contains {self.spoken_words(scenes)} spoken words across "
+                f"{have_scenes} scenes, about {have_s / 60:.1f} minutes of narration and "
+                f"dialogue, against a target of {want_s / 60:.1f} minutes.\n\n"
+                f"Return the SAME story with roughly {need_words} MORE words of narration "
+                f"and dialogue. {shape}\n\n"
+                f"Use the same characters and the same locations. Do NOT change the ending, "
+                f"do NOT invent new characters or new locations, and do NOT pad with "
+                f"repetition or restate what a scene has already said.\n\n"
                 f"Return ONLY the corrected JSON.")
 
     # ---------------------------------------------------------------- entry
@@ -330,21 +384,46 @@ class StoryGenerator:
         # result against what was requested.
         want_s = self.target_minutes * 60.0
         have_s = self.estimated_runtime_s(scenes)
-        if want_s > 0 and have_s < want_s * MIN_RUNTIME_RATIO:
-            log.warning("story_too_short_expanding", estimated_s=round(have_s),
-                        target_s=round(want_s), words=self.spoken_words(scenes))
+        # Expansion iterates. A single pass measured 54s -> 225s against a 420s target:
+        # real progress, still 46% short, and one more pass is far cheaper than shipping a
+        # half-length episode or re-running the whole stage. The loop stops early when a
+        # pass stops helping, because a model that has plateaued will keep returning the
+        # same length however many times it is asked.
+        for attempt in range(1, MAX_EXPANSION_PASSES + 1):
+            if want_s <= 0 or have_s >= want_s * MIN_RUNTIME_RATIO:
+                break
+            log.warning("story_too_short_expanding", attempt=attempt,
+                        estimated_s=round(have_s), target_s=round(want_s),
+                        words=self.spoken_words(scenes), scenes=len(scenes.scenes))
             try:
                 expanded, c3b, _, _ = self.scenes(
                     outline, draft, cast, existing_locations or [],
                     sfx_library or [], expand_from=scenes)
-                if self.estimated_runtime_s(expanded) > have_s:
-                    scenes, c3 = expanded, c3b
-                    have_s = self.estimated_runtime_s(scenes)
             except ValidationError as e:
                 # An expansion that will not validate is not worth failing the story over:
                 # a short episode is a quality problem, a dead job is a worse one.
                 log.warning("story_expansion_failed_keeping_original",
-                            error=str(e)[:160])
+                            attempt=attempt, error=str(e)[:160])
+                break
+            gained = self.estimated_runtime_s(expanded) - have_s
+            if gained <= 0:
+                log.warning("story_expansion_no_gain", attempt=attempt)
+                break
+            scenes, c3 = expanded, c3b
+            have_s += gained
+            if gained < want_s * MIN_EXPANSION_GAIN:
+                # Diminishing returns: keep what this pass added, stop asking.
+                log.info("story_expansion_plateaued", attempt=attempt,
+                         gained_s=round(gained), estimated_s=round(have_s))
+                break
+
+        if want_s > 0 and have_s < want_s * MIN_RUNTIME_RATIO:
+            # Shipped short, deliberately and visibly. Failing here would throw away a
+            # complete story over length, but a silent 4-minute episode against a 7-minute
+            # target is how target_minutes quietly stopped meaning anything before.
+            log.warning("story_below_target_after_expansion",
+                        estimated_s=round(have_s), target_s=round(want_s),
+                        ratio=round(have_s / want_s, 2))
         log.info("scenes_done", scenes=len(scenes.scenes), model=c3.model_id,
                  estimated_runtime_s=round(have_s), target_s=round(want_s))
 
@@ -355,6 +434,8 @@ class StoryGenerator:
             repairs=r1 + r2 + r3)
 
 
-def _slug(name: str, species: str) -> str:
-    base = "".join(ch.lower() if ch.isalnum() else "_" for ch in name).strip("_")
-    return f"{base}_{species}"
+# Character ids come from ONE place. This module used to compute its own, using
+# str.isalnum(), which treats Devanagari as alphanumeric while the factory's version
+# strips to [a-z0-9] - so a Hindi character name produced two different ids and the story
+# referenced one the factory had never built.
+from ..characters.factory import slug as _slug                        # noqa: E402

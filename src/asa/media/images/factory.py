@@ -99,6 +99,59 @@ class ImageChain:
         self._record(location_id, visual_prompt, dest, out_dir, meta)
         return Plate(location_id, dest, out_dir, gen.provider, gen.model_id, cached=False)
 
+    def scene(self, scene_id: int, prompt: str, out_dir: Path,
+              negative: str, seed: int | None = None) -> Plate:
+        """One finished frame per SCENE - characters, clothes and setting together.
+
+        Separate from `background()` because the two want opposite things. A background
+        plate is an empty stage: its prompt forbids figures so puppets can be composited
+        on top. A cinematic scene IS the figures, so it carries its own negative prompt
+        (which excludes the failure modes of photoreal generation instead) and is keyed per
+        scene rather than per location - two scenes in one classroom are different images.
+        """
+        key = prompt_key(prompt, self.size, negative)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dest = out_dir / f"scene_{scene_id:03d}.png"
+
+        hit = self.cache.get(key)
+        if hit is not None:
+            meta = self.cache.read_sidecar(key)
+            dest.write_bytes(hit.read_bytes())
+            log.info("scene_image_cache_hit", scene=scene_id,
+                     provider=meta.get("provider", "?"))
+            return Plate(str(scene_id), dest, out_dir, meta.get("provider", "cache"),
+                         meta.get("model_id", "?"), cached=True)
+
+        gen = self._generate_with(prompt, dest, seed, negative)
+        self.cache.put(key, dest)
+        self.cache.sidecar(key, {"provider": gen.provider, "model_id": gen.model_id,
+                                 "seed": gen.seed, "prompt": prompt,
+                                 "negative": negative, "size": list(self.size),
+                                 **gen.meta})
+        add_asset(self.db, dest, kind="scene_image", source=gen.provider,
+                  license_code=LICENCE_BY_PROVIDER.get(gen.provider, "UNKNOWN"),
+                  source_ref=gen.model_id,
+                  meta={"scene_id": scene_id, "prompt_sha": key, "seed": gen.seed})
+        return Plate(str(scene_id), dest, out_dir, gen.provider, gen.model_id,
+                     cached=False)
+
+    def _generate_with(self, prompt: str, dest: Path, seed: int | None,
+                       negative: str) -> GeneratedImage:
+        """Like `_generate` but with a caller-supplied negative prompt."""
+        failures: list[str] = []
+        for p in self.providers:
+            if not getattr(p, "available", False):
+                failures.append(f"{p.name}: unavailable")
+                continue
+            try:
+                return p.generate(prompt, dest, self.size, negative, seed)
+            except Exception as e:                                    # noqa: BLE001
+                failures.append(f"{p.name}: {str(e)[:80]}")
+                log.warning("scene_image_provider_failed", provider=p.name,
+                            error=str(e)[:140])
+        raise ProviderError("every image provider failed: " + " | ".join(failures),
+                            provider="images")
+
     def _generate(self, prompt: str, dest: Path, seed: int | None) -> GeneratedImage:
         failures: list[str] = []
         for p in self.providers:

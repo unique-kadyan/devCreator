@@ -35,15 +35,26 @@ from ..core.logging import get_logger
 log = get_logger("research")
 
 UA = "animal-story-automation/0.1 (personal project; contact via channel about page)"
-ANIMALS = ["fox", "rabbit", "lion", "cat", "monkey", "dog", "bear", "mouse", "owl",
-           "goat", "raccoon", "hedgehog"]
+# Animals a viewer in India actually recognises from around them, plus the ones the
+# character rig can draw. The Western default list opened every research run with raccoons
+# and hedgehogs - animals most of this channel's audience has never seen - and the topic
+# scorer then dutifully built stories around them.
+ANIMALS = ["monkey", "cow", "tiger", "elephant", "peacock", "dog", "cat", "goat",
+           "camel", "buffalo", "mongoose", "langur", "leopard", "deer", "owl", "fox"]
 ARCHETYPES = ["underdog", "trickster", "redemption", "mystery", "friendship", "survival",
               "comedy", "family"]
 
+# Sources are ordered India-first, then general natural history. The BBC
+# science_and_environment feed is deliberately NOT here: it carries general news including
+# human disasters, and the topic scorer rewards exactly that vocabulary (lost, family,
+# rescue, flood), so it supplied a steady stream of real tragedies for the safety filter
+# to reject. Removing the source is better than filtering it after the fact.
 DEFAULT_FEEDS = [
+    "https://www.thehindu.com/sci-tech/energy-and-environment/feeder/default.rss",
+    "https://indianexpress.com/section/india/feed/",
+    "https://www.downtoearth.org.in/rss/wildlife-biodiversity",
     "https://www.sciencedaily.com/rss/plants_animals/animals.xml",
     "https://phys.org/rss-feed/biology-news/plants-animals/",
-    "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
 ]
 
 
@@ -185,18 +196,23 @@ def collect_wikipedia(seeds: list[str] | None = None, timeout_s: float = 20.0
 
 # ------------------------------------------------------------------- seasonal
 
+# The Indian year, not the northern-European one. The old calendar had "first green" in
+# March and "harvest coming" in August, which is a British growing season - in most of
+# India March is already hot and the monsoon runs June to September. A seasonal hook that
+# contradicts the weather outside the viewer's window is worse than no hook.
 SEASONAL = {
-    1: ("fresh starts", "a promise made in the cold"), 2: ("friendship", "an unlikely pair"),
-    3: ("first green", "something buried starts to grow"),
-    4: ("rain and mud", "a plan ruined by weather"),
-    5: ("markets and making", "a stall that nobody visits"),
-    6: ("long evenings", "a secret kept all summer"),
-    7: ("heat and drought", "a well that runs dry"),
-    8: ("harvest coming", "too much work, too few hands"),
-    9: ("back to work", "the new one who does not fit"),
-    10: ("dark evenings", "a sound in the woods with an ordinary cause"),
-    11: ("storing up", "sharing when there is not enough"),
-    12: ("giving", "a gift that costs the giver something"),
+    1: ("kite season and cold mornings", "a promise made on a winter rooftop"),
+    2: ("exam season", "the one who studies while everyone else plays"),
+    3: ("colour and mischief", "a prank that goes further than intended"),
+    4: ("the heat arriving", "shade that somebody has to share"),
+    5: ("summer holidays", "a whole month with nothing to do and one idea"),
+    6: ("first rain", "the wait for water that finally breaks"),
+    7: ("monsoon floods", "a path that is gone until the water drops"),
+    8: ("independence and kites", "something small standing up to something large"),
+    9: ("festival preparations", "a job nobody wants, done well"),
+    10: ("lamps and long nights", "a light kept burning for someone"),
+    11: ("wedding season", "an invitation that arrives for the wrong person"),
+    12: ("winter fog", "finding the way when nothing is visible"),
 }
 
 

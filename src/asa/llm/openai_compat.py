@@ -120,16 +120,34 @@ class OpenAICompatProvider:
             choice = (j.get("choices") or [{}])[0]
             text = (choice.get("message") or {}).get("content") or ""
             usage = j.get("usage") or {}
+            # finish_reason must be carried through. The story generator uses it to tell a
+            # TRUNCATED reply from an invalid one - truncation needs a bigger token budget,
+            # a schema error needs a repair prompt, and treating one as the other fails
+            # twice in the same place. This was only ever populated by the OpenRouter
+            # provider, so once Groq/Mistral/Cohere led the chain the distinction was lost
+            # and every truncation was misdiagnosed as a schema failure.
             return Completion(text=text, model_id=j.get("model", model_id),
                               provider=self.name,
                               prompt_tokens=usage.get("prompt_tokens", 0),
-                              completion_tokens=usage.get("completion_tokens", 0))
+                              completion_tokens=usage.get("completion_tokens", 0),
+                              meta={"finish_reason": choice.get("finish_reason") or ""})
         if r.status_code in (401, 403):
             raise AuthError(f"{self.name} rejected the key ({r.status_code})")
         if r.status_code == 429:
             raise RateLimited(f"{model_id} rate limited", provider=self.name)
-        if r.status_code in (402, 413):
-            raise QuotaExhausted(f"{self.name} quota reached", provider=self.name,
+        if r.status_code == 413:
+            # 413 from these providers is a TOKENS-PER-MINUTE ceiling, not a spent
+            # allowance: Groq answers "Limit 8000, Requested 60122, please reduce your
+            # message size and try again" on an account with 14,400 requests/day left.
+            # It was classified as QuotaExhausted with a six-hour cooldown, which removed
+            # the fastest provider in the chain for the rest of the day because one scenes
+            # prompt was oversized. RateLimited is a subclass of ProviderError, so the
+            # model loop advances to the next model - which may have a larger window - and
+            # the minute window clears on its own.
+            raise RateLimited(f"{model_id} exceeded the per-minute token limit (413)",
+                              provider=self.name, retry_after_s=60.0)
+        if r.status_code == 402:
+            raise QuotaExhausted(f"{self.name} allowance spent (402)", provider=self.name,
                                  resets_at=datetime.now(timezone.utc) + timedelta(hours=6))
         raise ProviderError(f"{model_id} HTTP {r.status_code}: {r.text[:140]}",
                             provider=self.name)

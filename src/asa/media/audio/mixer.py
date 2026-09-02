@@ -73,6 +73,19 @@ def _build_graph(voice: list[Placed], music: list[Placed], sfx: list[Placed],
     return inputs, ";".join(parts)
 
 
+# Headroom left below the delivery ceiling when mastering, to absorb the overshoot the AAC
+# encoder adds. Measured on this pipeline: a -1.0 dBFS mixdown encoded to 192k AAC came
+# back at -0.3 dBFS, and another run at -0.7. 1.0 dB covers the observed range with margin
+# and costs nothing perceptible - loudnorm still hits the LUFS target, which is what
+# actually governs how loud the video sounds.
+AAC_ENCODE_HEADROOM_DB = 1.0
+
+
+def master_ceiling_db(true_peak_db: float) -> float:
+    """The peak ceiling the PRE-encode master should aim at for a given delivery target."""
+    return true_peak_db - AAC_ENCODE_HEADROOM_DB
+
+
 def _measure_for_loudnorm(path: Path, target_lufs: float, true_peak_db: float) -> dict:
     """Pass 1 of two-pass loudnorm: get the real measurements from the source."""
     proc = subprocess.run(
@@ -104,12 +117,18 @@ def mix(voice: list[Placed], music: list[Placed], sfx: list[Placed],
                    + ["-filter_complex", graph, "-map", "[bed]",
                       "-c:a", "pcm_s24le", str(stage)], check=True)
 
-    meas = _measure_for_loudnorm(stage, target_lufs, true_peak_db)
-    ln = (f"loudnorm=I={target_lufs}:TP={true_peak_db}:LRA=11"
+    # Master BELOW the delivery ceiling, because the file QC measures is not this one.
+    # mux() re-encodes to AAC, and a lossy codec reconstructs inter-sample peaks above the
+    # PCM ceiling it was given: a mixdown limited to exactly -1.0 dBFS measured -0.3 dBFS
+    # once encoded, and QC - which reads the finished MP4 - correctly failed it. The
+    # limiter was never wrong; it was aiming at the wrong target.
+    master_tp = true_peak_db - AAC_ENCODE_HEADROOM_DB
+    meas = _measure_for_loudnorm(stage, target_lufs, master_tp)
+    ln = (f"loudnorm=I={target_lufs}:TP={master_tp}:LRA=11"
           f":measured_I={meas['input_i']}:measured_TP={meas['input_tp']}"
           f":measured_LRA={meas['input_lra']}:measured_thresh={meas['input_thresh']}"
           f":offset={meas['target_offset']}:linear=true:print_format=summary")
-    ceiling = 10 ** (true_peak_db / 20)
+    ceiling = 10 ** (master_tp / 20)
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", str(stage),
          "-af", f"{ln},alimiter=limit={ceiling:.4f}:level=disabled,aresample={sample_rate}",
