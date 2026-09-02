@@ -255,20 +255,29 @@ class YouTubeClient:
 
 
 def record_upload(db: Path, job_id: int, meta, result: UploadResult | None,
-                  made_for_kids: bool, privacy: str, error: str = "") -> None:
+                  made_for_kids: bool, privacy: str, error: str = "", part: int = 1,
+                  title: str = "", description: str = "") -> None:
+    """Record one upload attempt.
+
+    `title` and `description` override the ones on `meta` because a part is published as
+    "Story (Part 2 of 3)" with a series pointer, and the row has to record what was
+    actually sent to YouTube rather than the story-level metadata it was derived from.
+    """
     with tx(db) as con:
         con.execute("""
             INSERT INTO youtube_uploads (job_id, video_id, title, description, tags,
                 category_id, privacy_status, made_for_kids, synthetic_disclosed,
-                thumbnail_set, captions_set, upload_status, api_response, error,
+                thumbnail_set, captions_set, upload_status, api_response, error, part,
                 uploaded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))
-            ON CONFLICT(video_id) DO UPDATE SET
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))
+            ON CONFLICT(job_id, part) DO UPDATE SET
+                video_id=COALESCE(excluded.video_id, youtube_uploads.video_id),
                 upload_status=excluded.upload_status, privacy_status=excluded.privacy_status,
                 error=excluded.error
-        """, (job_id, result.video_id if result else None, meta.title, meta.description,
+        """, (job_id, result.video_id if result else None,
+              title or meta.title, description or meta.description,
               jdump(meta.tags), 1, result.privacy_status if result else privacy,
               int(made_for_kids), 1, int(bool(result and result.thumbnail_set)),
               int(bool(result and result.captions_set)),
               "uploaded" if result else "failed",
-              jdump(result.response) if result else None, error or None))
+              jdump(result.response) if result else None, error or None, part))

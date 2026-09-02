@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import random
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -121,6 +123,9 @@ def collect_rss(feeds: list[str] | None = None, per_feed: int = 8,
 
 # ------------------------------------------------------------------ Wikipedia
 
+_WIKI_PACE_S = 0.25
+
+
 def collect_wikipedia(seeds: list[str] | None = None, timeout_s: float = 20.0
                       ) -> list[Candidate]:
     """Pull a plain-language summary for each animal and mine it for story hooks.
@@ -134,15 +139,35 @@ def collect_wikipedia(seeds: list[str] | None = None, timeout_s: float = 20.0
                       follow_redirects=True) as client:
         for animal in seeds:
             url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{animal}"
-            try:
-                r = client.get(url)
-                if r.status_code == 429:
-                    raise RateLimited("wikipedia rate limited", provider="wikipedia")
-                r.raise_for_status()
-                data = r.json()
-            except httpx.HTTPError as e:
-                log.warning("wikipedia_failed", animal=animal, error=str(e)[:140])
+            data = None
+            for attempt in range(3):
+                try:
+                    r = client.get(url)
+                    if r.status_code == 429:
+                        delay = 2 ** attempt + random.random()
+                        log.warning("wikipedia_rate_limited", animal=animal,
+                                    attempt=attempt + 1, delay_s=round(delay, 1))
+                        time.sleep(delay)
+                        continue
+                    r.raise_for_status()
+                    data = r.json()
+                    break
+                except httpx.HTTPError as e:
+                    log.warning("wikipedia_failed", animal=animal, error=str(e)[:140])
+                    break
+            if data is None:
+                # Backoff did not clear it. Returning the summaries already gathered beats
+                # raising: research runs unattended, the remaining seeds would hit the same
+                # throttle, and eight usable animals are worth more than an exception that
+                # discards them. Seasonal and RSS still contribute on top of this.
+                if out:
+                    log.warning("wikipedia_partial", collected=len(out),
+                                stopped_at=animal, of=len(seeds))
+                    break
                 continue
+            # The WMF asks clients to be contactable AND unhurried; pacing the loop is what
+            # stops a 20-seed run tripping the throttle in the first place.
+            time.sleep(_WIKI_PACE_S)
             extract = (data.get("extract") or "").strip()
             if not extract:
                 continue
@@ -249,23 +274,54 @@ def collect_youtube_search(api_key: str, queries: list[str], quota=None,
 
 
 def collect_all(cfg, quota=None) -> list[Candidate]:
+    """Run every enabled collector, isolating each one's failures from the others.
+
+    Research runs unattended on a schedule, so one source having a bad day must not take
+    the run down with it - that is the whole reason `seasonal` needs no network. Before
+    this isolation existed a single Wikipedia 429 aborted the run and discarded the RSS
+    and seasonal candidates already gathered, which is the opposite of degrading.
+
+    QuotaExhausted is the deliberate exception: it means a *budget* is gone rather than a
+    source being flaky, and silently continuing would let the next collector spend against
+    a limit the operator has already hit.
+    """
     enabled = set(cfg.get("research.collectors", ["rss", "wikipedia", "seasonal"]))
-    out: list[Candidate] = []
+    sources: list[tuple[str, object]] = []
     if "rss" in enabled:
-        out += collect_rss(cfg.get("research.feeds"))
+        sources.append(("rss", lambda: collect_rss(cfg.get("research.feeds"))))
     if "wikipedia" in enabled:
-        out += collect_wikipedia()
+        sources.append(("wikipedia", collect_wikipedia))
     if "seasonal" in enabled:
-        out += collect_seasonal()
+        sources.append(("seasonal", collect_seasonal))
     if "youtube_search" in enabled:
-        out += collect_youtube_search(
+        sources.append(("youtube_search", lambda: collect_youtube_search(
             cfg.secret("YT_API_KEY", required=False),
             cfg.get("research.queries", [
                 "animated animal short story", "original animation short film animals",
                 "cartoon fox story", "animated fable short"]),
             quota=quota,
-            max_calls=int(cfg.get("research.youtube_search_calls_per_day", 4)))
+            max_calls=int(cfg.get("research.youtube_search_calls_per_day", 4)))))
     if "reddit" in enabled:
         log.warning("reddit_collector_requested_but_unavailable",
                     reason="self-service app registration closed; manual approval needed")
+
+    out: list[Candidate] = []
+    failures: list[str] = []
+    for name, fn in sources:
+        try:
+            got = fn()
+        except QuotaExhausted:
+            raise
+        except Exception as e:                                        # noqa: BLE001
+            log.warning("collector_failed", collector=name, error=str(e)[:200])
+            failures.append(name)
+            continue
+        log.info("collector_ok", collector=name, n=len(got))
+        out += got
+
+    if failures and not out:
+        raise ProviderError(
+            "every research collector failed: " + ", ".join(failures), provider="research")
+    if failures:
+        log.warning("research_degraded", failed=failures, candidates=len(out))
     return out

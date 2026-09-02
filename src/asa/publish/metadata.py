@@ -187,6 +187,29 @@ def build_description(story: dict, base: str, cast: list[dict], channel: str,
     return body[:room].rstrip() + "\n\n" + line
 
 
+def part_description(base: str, part: int, total: int,
+                     earlier_video_ids: list[str] | None = None) -> str:
+    """Prefix a part's description with where it sits in the series.
+
+    The pointer goes at the TOP, above the story summary. YouTube collapses a description
+    after roughly three lines, so anything below that is invisible unless the viewer taps
+    "more" - and a viewer who does not know they are on part 2 of 3 has no reason to tap.
+    Links to earlier parts follow, because the person most likely to read this is someone
+    who landed on part 3 first and needs a way back to the start.
+    """
+    if total <= 1:
+        return base[:MAX_DESCRIPTION]
+    header = [f"Part {part} of {total}."]
+    ids = [v for v in (earlier_video_ids or []) if v]
+    if ids:
+        header.append("Start from the beginning: "
+                      + " ".join(f"https://youtu.be/{v}" for v in ids[:3]))
+    elif part < total:
+        header.append("The next part follows on this channel - subscribe to catch it.")
+    out = "\n".join(header) + "\n\n" + base
+    return out[:MAX_DESCRIPTION]
+
+
 def clean_tags(tags: list[str]) -> list[str]:
     seen, out, total = set(), [], 0
     for raw in tags:

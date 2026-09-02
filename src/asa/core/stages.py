@@ -182,27 +182,60 @@ def assemble(ctx, job: dict) -> dict:
     return assemble_episode(ctx, job)
 
 
+def video_parts(ctx, job: dict) -> list[dict]:
+    """Every rendered part of this job, in release order. One row for a single-part job."""
+    with read(ctx.db) as con:
+        rows = con.execute("SELECT * FROM videos WHERE job_id = ? ORDER BY part",
+                           (job["id"],)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _part_scene_ids(ctx, job: dict, part: int) -> tuple[int, int] | None:
+    with read(ctx.db) as con:
+        row = con.execute(
+            "SELECT scene_from, scene_to FROM video_parts WHERE job_id = ? AND part = ?",
+            (job["id"], part)).fetchone()
+    return (row["scene_from"], row["scene_to"]) if row else None
+
+
 @stage("subtitles", "VIDEO_RENDERED", "SUBTITLED", "assemble")
 def subtitles(ctx, job: dict) -> dict:
+    from ..media.audio.build import StoryAudio
     from ..media.subtitles.build import captions_from_audio, write_srt, write_vtt
     from ..scenes.persist import load_scenes, load_story
     paths = ctx.paths_for(job["id"])
     story = load_story(ctx.db, job["story_id"])
     scenes = load_scenes(ctx.db, job["story_id"])
     audio = ctx.load_audio(job["id"], scenes, story["cast"])
-    offsets, clock = {}, 0.0
-    for sa in audio.scenes:
-        offsets[sa.scene_id] = clock
-        clock += sa.duration_s
-    caps = captions_from_audio(
-        audio, offsets,
-        max_chars_per_line=int(ctx.cfg.get("subtitles.max_chars_per_line", 32)))
-    srt = write_srt(caps, paths.out / "captions.srt")
-    vtt = write_vtt(caps, paths.out / "captions.vtt")
-    with tx(ctx.db) as con:
-        con.execute("UPDATE videos SET srt_path = ?, vtt_path = ? WHERE job_id = ?",
-                    (str(srt), str(vtt), job["id"]))
-    return {"captions": len(caps), "srt": str(srt)}
+    by_id = {sa.scene_id: sa for sa in audio.scenes}
+    idx_of = {s["id"]: s["idx"] for s in scenes}
+    max_chars = int(ctx.cfg.get("subtitles.max_chars_per_line", 32))
+
+    out = []
+    for v in video_parts(ctx, job):
+        span = _part_scene_ids(ctx, job, v["part"])
+        mine = [sa for sa in audio.scenes
+                if span is None or span[0] <= idx_of.get(sa.scene_id, -1) <= span[1]]
+        # Caption times restart at zero for every part. They are absolute offsets into a
+        # finished video, and each part IS a finished video - carrying the whole-story
+        # clock through would put part 3's captions three minutes past its own end.
+        offsets, clock = {}, 0.0
+        for sa in mine:
+            offsets[sa.scene_id] = clock
+            clock += sa.duration_s
+        part_audio = StoryAudio()
+        part_audio.scenes = mine
+        caps = captions_from_audio(part_audio, offsets, max_chars_per_line=max_chars)
+        suffix = "" if len(video_parts(ctx, job)) == 1 else f"_part{v['part']}"
+        srt = write_srt(caps, paths.out / f"captions{suffix}.srt")
+        vtt = write_vtt(caps, paths.out / f"captions{suffix}.vtt")
+        with tx(ctx.db) as con:
+            con.execute("UPDATE videos SET srt_path = ?, vtt_path = ? "
+                        "WHERE job_id = ? AND part = ?",
+                        (str(srt), str(vtt), job["id"], v["part"]))
+        out.append({"part": v["part"], "captions": len(caps), "srt": str(srt)})
+    return {"parts": len(out), "captions": sum(o["captions"] for o in out),
+            "files": [o["srt"] for o in out]}
 
 
 @stage("thumbnail", "SUBTITLED", "THUMBNAILED", "assemble")
@@ -218,19 +251,32 @@ def thumbnail(ctx, job: dict) -> dict:
         raise ValidationError("story has no cast; cannot build a thumbnail")
     # Pick the most visually distinctive scene: the climax, then any interior/exterior with
     # the protagonist staged large.
-    plate_scene = max(scenes, key=lambda s: (
-        float((s["staging"].get(hero["character_id"]) or {}).get("scale", 0)), s["idx"]))
-    plate = ctx.assets / "backgrounds" / plate_scene["location_id"] / "plate.png"
     texts = _thumbnail_texts(ctx.db, job["id"], story)
-    variants = generate_set(ctx.db, job["id"], plate,
-                            ctx.assets / "characters" / hero["character_id"],
-                            texts, paths.thumbs,
-                            variants=int(ctx.cfg.get("thumbnail.variants", 6)))
-    with tx(ctx.db) as con:
-        con.execute("UPDATE videos SET thumbnail_path = ? WHERE job_id = ?",
-                    (str(variants[0].path), job["id"]))
-    return {"variants": len(variants), "best": variants[0].score,
-            "chosen": str(variants[0].path)}
+    parts = video_parts(ctx, job)
+    out = []
+    for v in parts:
+        span = _part_scene_ids(ctx, job, v["part"])
+        # Draw each part's plate from its OWN scenes. Reusing one frame across a series
+        # gives every part an identical thumbnail, which reads as a duplicate upload in a
+        # subscriber's feed - the exact opposite of what parts are for.
+        pool = [s for s in scenes
+                if span is None or span[0] <= s["idx"] <= span[1]] or scenes
+        plate_scene = max(pool, key=lambda s: (
+            float((s["staging"].get(hero["character_id"]) or {}).get("scale", 0)),
+            s["idx"]))
+        plate = ctx.assets / "backgrounds" / plate_scene["location_id"] / "plate.png"
+        suffix = "" if len(parts) == 1 else f"_part{v['part']}"
+        variants = generate_set(ctx.db, job["id"], plate,
+                                ctx.assets / "characters" / hero["character_id"],
+                                texts, paths.thumbs / suffix.lstrip("_") if suffix
+                                else paths.thumbs,
+                                variants=int(ctx.cfg.get("thumbnail.variants", 6)))
+        with tx(ctx.db) as con:
+            con.execute("UPDATE videos SET thumbnail_path = ? WHERE job_id = ? AND part = ?",
+                        (str(variants[0].path), job["id"], v["part"]))
+        out.append({"part": v["part"], "variants": len(variants),
+                    "best": variants[0].score, "chosen": str(variants[0].path)})
+    return {"parts": len(out), "thumbnails": out}
 
 
 @stage("metadata", "THUMBNAILED", "METADATA_READY", "story")
@@ -264,45 +310,57 @@ def quality_control(ctx, job: dict) -> dict:
     story = load_story(ctx.db, job["story_id"])
     scenes = load_scenes(ctx.db, job["story_id"])
     meta = ctx.load_metadata(job["id"])
-    with read(ctx.db) as con:
-        v = con.execute("SELECT * FROM videos WHERE job_id = ?", (job["id"],)).fetchone()
-    if v is None:
+    parts = video_parts(ctx, job)
+    if not parts:
         raise ValidationError("no video row for this job")
 
-    # Compare the container against the SCENE TIMELINE, not against the video row - the
-    # video row's duration came from probing that same file, so checking one against the
-    # other could never fail. The scenes' durations came from the synthesised audio, which
-    # is the independent source of truth this check needs.
-    planned = sum(sc["duration_s"] or 0.0 for sc in scenes)
-    if planned <= 0:
-        planned = v["duration_s"]
-    report = checks.run(
-        ctx.db, Path(v["path"]),
-        expected_duration_s=planned,
-        srt=Path(v["srt_path"]) if v["srt_path"] else None,
-        thumbnail=Path(v["thumbnail_path"]) if v["thumbnail_path"] else None,
-        title=meta.title, description=meta.description, tags=meta.tags,
-        story=story, scenes=scenes,
-        target_lufs=float(ctx.cfg.get("audio.target_lufs", -14.0)),
-        true_peak_db=float(ctx.cfg.get("audio.true_peak_db", -1.0)),
-        made_for_kids=ctx.cfg.get("channel.made_for_kids"),
-        disclose_synthetic=bool(ctx.cfg.get("channel.disclose_synthetic", True)),
-        asset_paths=_job_asset_paths(ctx, job))
+    idx_of = {s["id"]: s["idx"] for s in scenes}
+    warnings, failures = [], []
+    for v in parts:
+        span = _part_scene_ids(ctx, job, v["part"])
+        mine = [sc for sc in scenes
+                if span is None or span[0] <= sc["idx"] <= span[1]] or scenes
+        # Compare the container against the SCENE TIMELINE, not against the video row - the
+        # video row's duration came from probing that same file, so checking one against
+        # the other could never fail. The scenes' durations came from the synthesised
+        # audio, which is the independent source of truth this check needs. For a part,
+        # only ITS scenes count; measuring a 3-minute part against the whole story's
+        # timeline would fail every part of every series.
+        planned = sum(sc["duration_s"] or 0.0 for sc in mine)
+        if planned <= 0:
+            planned = v["duration_s"]
+        report = checks.run(
+            ctx.db, Path(v["path"]),
+            expected_duration_s=planned,
+            srt=Path(v["srt_path"]) if v["srt_path"] else None,
+            thumbnail=Path(v["thumbnail_path"]) if v["thumbnail_path"] else None,
+            title=meta.title, description=meta.description, tags=meta.tags,
+            story=story, scenes=mine,
+            target_lufs=float(ctx.cfg.get("audio.target_lufs", -14.0)),
+            true_peak_db=float(ctx.cfg.get("audio.true_peak_db", -1.0)),
+            made_for_kids=ctx.cfg.get("channel.made_for_kids"),
+            disclose_synthetic=bool(ctx.cfg.get("channel.disclose_synthetic", True)),
+            asset_paths=_job_asset_paths(ctx, job),
+            min_minutes=float(ctx.cfg.get("production.part_min_minutes", 1.0) or 1.0))
 
-    # QC is the stage that actually measured the finished file, so it owns the recorded
-    # loudness. Leaving it to `assemble` means a job resumed after that stage keeps a
-    # stale (or zero) value in a column the dashboard displays as fact.
-    measured = next((f.detail.get("lufs") for f in report.findings
-                     if f.check == "audio.loudness" and "lufs" in f.detail), None)
-    with tx(ctx.db) as con:
-        con.execute("UPDATE videos SET qc_report = ?, "
-                    "lufs = COALESCE(?, lufs) WHERE job_id = ?",
-                    (jdump(report.to_dict()), measured, job["id"]))
-    if not report.passed:
-        raise PolicyViolation("QC failed: " + "; ".join(
-            f.message for f in report.failures)[:600])
-    return {"passed": True, "warnings": len(report.warnings),
-            "warning_list": [f.check for f in report.warnings]}
+        # QC is the stage that actually measured the finished file, so it owns the recorded
+        # loudness. Leaving it to `assemble` means a job resumed after that stage keeps a
+        # stale (or zero) value in a column the dashboard displays as fact.
+        measured = next((f.detail.get("lufs") for f in report.findings
+                         if f.check == "audio.loudness" and "lufs" in f.detail), None)
+        with tx(ctx.db) as con:
+            con.execute("UPDATE videos SET qc_report = ?, lufs = COALESCE(?, lufs) "
+                        "WHERE job_id = ? AND part = ?",
+                        (jdump(report.to_dict()), measured, job["id"], v["part"]))
+        warnings += [f"part {v['part']}: {f.check}" for f in report.warnings]
+        failures += [f"part {v['part']}: {f.message}" for f in report.failures]
+
+    if failures:
+        # Every part is checked before raising. Stopping at the first failure would hide
+        # the rest, and a series where two parts are broken needs both reported at once.
+        raise PolicyViolation("QC failed: " + "; ".join(failures)[:600])
+    return {"parts": len(parts), "passed": True, "warnings": len(warnings),
+            "warning_list": warnings}
 
 
 @stage("approval", "QC_PASSED", "AWAITING_APPROVAL", "assemble", retryable=False)
@@ -335,33 +393,64 @@ def approval(ctx, job: dict) -> dict:
 def upload(ctx, job: dict) -> dict:
     from ..publish.youtube import record_upload
     from ..scenes.persist import load_story
+    from ..assemble.parts import Part, part_title
+    from ..publish.metadata import part_description
     meta = ctx.load_metadata(job["id"])
-    with read(ctx.db) as con:
-        v = dict(con.execute("SELECT * FROM videos WHERE job_id = ?",
-                             (job["id"],)).fetchone())
+    parts = video_parts(ctx, job)
+    if not parts:
+        raise ValidationError("no video row for this job")
     made_for_kids = ctx.cfg.get("channel.made_for_kids")
     if made_for_kids is None:
         raise PolicyViolation(
             "channel.made_for_kids is unset. YouTube requires an explicit audience "
             "declaration for every upload; read docs/05-COMPLIANCE.md §2 and set it.")
     privacy = ctx.cfg.get("production.privacy_on_upload", "private")
-    try:
-        result = ctx.youtube.upload(
-            Path(v["path"]), title=meta.title, description=meta.description,
-            tags=meta.tags, category_id=int(ctx.cfg.get("channel.category_id", 1)),
-            privacy=privacy, made_for_kids=bool(made_for_kids),
-            language=ctx.cfg.get("channel.language", "en"),
-            thumbnail=Path(v["thumbnail_path"]) if v["thumbnail_path"] else None,
-            captions=Path(v["srt_path"]) if v["srt_path"] else None)
-    except Exception as e:                                     # noqa: BLE001
-        record_upload(ctx.db, job["id"], meta, None, bool(made_for_kids), privacy,
-                      error=str(e)[:800])
-        raise
-    record_upload(ctx.db, job["id"], meta, result, bool(made_for_kids), privacy)
-    ctx.notifier.send(f"Uploaded: {meta.title}", result.watch_url, level="info",
-                      link=result.watch_url)
-    return {"video_id": result.video_id, "privacy": result.privacy_status,
-            "url": result.watch_url, "units": result.units_spent}
+    total = len(parts)
+
+    uploaded = []
+    for v in parts:
+        with read(ctx.db) as con:
+            done = con.execute(
+                "SELECT video_id FROM youtube_uploads WHERE job_id = ? AND part = ? "
+                "AND video_id IS NOT NULL", (job["id"], v["part"])).fetchone()
+        if done:
+            # Upload is retryable and videos.insert costs 1,600 units. Re-uploading a part
+            # that already succeeded because a LATER part failed would burn the day's quota
+            # and leave a duplicate on the channel.
+            log.info("part_already_uploaded", job=job["id"], part=v["part"],
+                     video_id=done["video_id"])
+            uploaded.append({"part": v["part"], "video_id": done["video_id"],
+                             "skipped": True})
+            continue
+
+        pobj = Part(v["part"], [], float(v["duration_s"] or 0.0))
+        title = part_title(meta.title, pobj, total)
+        description = part_description(meta.description, v["part"], total,
+                                       [u.get("video_id") for u in uploaded])
+        try:
+            result = ctx.youtube.upload(
+                Path(v["path"]), title=title, description=description,
+                tags=meta.tags, category_id=int(ctx.cfg.get("channel.category_id", 1)),
+                privacy=privacy, made_for_kids=bool(made_for_kids),
+                language=ctx.cfg.get("channel.language", "en"),
+                thumbnail=Path(v["thumbnail_path"]) if v["thumbnail_path"] else None,
+                captions=Path(v["srt_path"]) if v["srt_path"] else None)
+        except Exception as e:                                     # noqa: BLE001
+            record_upload(ctx.db, job["id"], meta, None, bool(made_for_kids), privacy,
+                          error=str(e)[:800], part=v["part"], title=title,
+                          description=description)
+            raise
+        record_upload(ctx.db, job["id"], meta, result, bool(made_for_kids), privacy,
+                      part=v["part"], title=title, description=description)
+        uploaded.append({"part": v["part"], "video_id": result.video_id,
+                         "url": result.watch_url, "units": result.units_spent})
+        ctx.notifier.send(f"Uploaded: {title}", result.watch_url, level="info",
+                          link=result.watch_url)
+
+    first = next((u for u in uploaded if u.get("url")), uploaded[0] if uploaded else {})
+    return {"parts": total, "uploaded": uploaded,
+            "video_id": first.get("video_id"), "url": first.get("url"),
+            "units": sum(u.get("units", 0) for u in uploaded)}
 
 
 # ---------------------------------------------------------------- helpers

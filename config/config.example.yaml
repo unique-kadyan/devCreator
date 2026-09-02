@@ -37,6 +37,14 @@ channel:
   cta: "If you enjoyed this, subscribe - there is another animal story on the way."
 
 production:
+  # Multi-part release. A story is cut into videos of roughly this length, each published
+  # as its own upload in a series playlist, because a viewer who finishes a part and finds
+  # the next one waiting is the viewer who subscribes. The cut is computed from MEASURED
+  # scene durations at assemble time - scenes are atomic, so a story with chunky scenes can
+  # land outside this window and that is reported rather than forced.
+  # Set part_max_minutes to 0 to go back to one video per story.
+  part_min_minutes: 2.5
+  part_max_minutes: 3.0
   max_videos_per_week: 3            # a ceiling, not a target. See docs/05 §4.
   target_minutes: 7
   fps: 24
@@ -215,7 +223,14 @@ runtime:
     llm:      { attempts: 3, base_delay_s: 5,  max_delay_s: 60 }
     render:   { attempts: 2, base_delay_s: 10, max_delay_s: 60 }
   timeouts_s:
-    story: 300
+    # These are wall-clock ceilings per stage, enforced in core/runner.py. They are a
+    # backstop against a wedged provider, NOT a performance target - set them well above
+    # the slowest healthy run or they fire on ordinary work.
+    # `story` is 1800 because it is the only stage that walks the whole free-model buffer:
+    # a measured run spent ~13 minutes on outline + draft + scenes, most of it waiting on
+    # busy models and retrying schema failures. The 300 that used to be here would have
+    # timed out every single episode once the deadline actually started working.
+    story: 1800
     art: 900
     voice: 1800
     animate: 5400
