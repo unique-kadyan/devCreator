@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Privacy Policy — DevCreator</title>
+<link rel="icon" type="image/png" href="assets/logo-48.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Privacy Policy</h1>
+  <p class="sub">DevCreator · Last updated 2 September 2026</p>
+  <nav style="margin-top:14px">
+    <a href="index.html">Home</a>
+    <a href="terms.html">Terms of Service</a>
+  </nav>
+</header>
+
+<h2>1. Who this policy covers</h2>
+<p>
+  DevCreator ("the application") is a private, self-hosted command-line tool that produces
+  original animated short films and publishes them to a single YouTube channel owned by its
+  sole operator. It is not a hosted service and is not offered to other people. It has no
+  user accounts and no sign-up.
+</p>
+<div class="note">
+  <strong>The application has exactly one user: its operator, who is also the owner of the
+  YouTube channel it publishes to.</strong> It authenticates only to that operator's own
+  Google account and accesses only data belonging to that account.
+</div>
+
+<h2>2. Use of YouTube API Services</h2>
+<p>
+  This application uses <strong>YouTube API Services</strong>. By using it, the operator
+  agrees to be bound by the
+  <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a>.
+</p>
+<p>
+  Google's handling of data received through these APIs is governed by the
+  <a href="http://www.google.com/policies/privacy">Google Privacy Policy</a>.
+</p>
+
+<h2>3. What data the application accesses</h2>
+<table>
+  <tr><th>Category</th><th>Specifics</th><th>Source</th></tr>
+  <tr>
+    <td>Authorisation credentials</td>
+    <td>An OAuth 2.0 access token and refresh token for the operator's own Google account.
+        Granted scopes: <code>youtube.upload</code>, <code>youtube.readonly</code>,
+        <code>youtube.force-ssl</code>, <code>yt-analytics.readonly</code>.</td>
+    <td>Google OAuth consent, granted by the operator</td>
+  </tr>
+  <tr>
+    <td>Own-video counters</td>
+    <td>View count, like count and comment count for videos the application itself
+        published to the operator's channel.</td>
+    <td>YouTube Data API — <code>videos.list</code></td>
+  </tr>
+  <tr>
+    <td>Own-channel performance data</td>
+    <td>Aggregate metrics only: views, estimated minutes watched, average view duration and
+        percentage, likes, dislikes, comment and share counts, subscribers gained and lost,
+        traffic-source categories, and an audience-retention curve.</td>
+    <td>YouTube Analytics API — <code>reports.query</code></td>
+  </tr>
+  <tr>
+    <td>Public topic research</td>
+    <td>Publicly listed titles and metadata of existing videos, used only to avoid
+        producing a story that duplicates one that already exists.</td>
+    <td>YouTube Data API — <code>search.list</code></td>
+  </tr>
+</table>
+
+<h3>What the application does not access</h3>
+<p>
+  It does not access, request, collect or store any personal information about viewers or
+  about any person other than the operator. It does not read viewer identities, individual
+  watch histories, subscriber lists, private messages, or comment authors' account details.
+  The performance data described above is aggregate and contains no individual viewer
+  records. The application holds no data belonging to any third party's Google account.
+</p>
+
+<h2>4. How data is stored</h2>
+<p>
+  All data stays on the operator's own computer. Nothing is transmitted to a server operated
+  by the application, because no such server exists.
+</p>
+<table>
+  <tr><th>What</th><th>Where</th><th>Protection</th></tr>
+  <tr><td>OAuth tokens</td><td>A single local file, <code>config/youtube_token.json</code></td>
+      <td>File permissions <code>0600</code> — readable only by the operator's OS account.
+          Never written to logs or to the database.</td></tr>
+  <tr><td>Video counters and channel analytics</td><td>A local SQLite database file</td>
+      <td>Stored on the operator's own disk, not published or transmitted.</td></tr>
+</table>
+
+<h2>5. How data is used</h2>
+<p>
+  Retrieved performance data is used for one purpose: to inform which story topics the
+  operator's own channel produces next. It is not used to build profiles of any person, is
+  not used for advertising, and is not combined with data from any other source about any
+  individual.
+</p>
+
+<h2>6. Data sharing</h2>
+<p>
+  Data obtained from YouTube API Services is <strong>not sold, rented, traded, or shared
+  with any third party</strong> under any circumstances. It is not transferred to advertisers,
+  data brokers, or analytics providers.
+</p>
+<p>
+  The application does use third-party providers to generate story text and artwork — these
+  receive only prompts describing fictional animal characters and story situations written
+  by the application. <strong>No data obtained from YouTube API Services is ever sent to
+  them.</strong>
+</p>
+
+<h2>7. Data retention and deletion</h2>
+<p>
+  Data obtained from YouTube API Services is retained only while it remains useful for
+  choosing future topics, and is deleted whenever the operator chooses. Because all storage
+  is local, deletion is immediate and complete:
+</p>
+<ul>
+  <li>Deleting the local database file permanently removes all stored counters and analytics.</li>
+  <li>Deleting <code>config/youtube_token.json</code> permanently removes the stored
+      authorisation credentials and ends the application's access.</li>
+  <li>The application stores no backups off the operator's machine, so no copy survives
+      elsewhere.</li>
+</ul>
+<p>
+  When authorisation is revoked (see section 8), the application immediately loses all
+  access to YouTube API Services, and any data previously retrieved is deleted from local
+  storage.
+</p>
+
+<h2>8. Revoking access</h2>
+<p>
+  The operator may revoke this application's access to their Google account at any time,
+  without notice and without contacting anyone, through the Google security settings page:
+</p>
+<p>
+  <a href="https://myaccount.google.com/permissions">https://myaccount.google.com/permissions</a>
+</p>
+<p>
+  Select the application in the list of third-party apps with account access and choose
+  <strong>Remove Access</strong>. Revocation takes effect immediately and permanently
+  invalidates the stored refresh token.
+</p>
+
+<h2>9. This website</h2>
+<p>
+  This site is a set of static pages. It sets no cookies, runs no analytics or tracking,
+  serves no advertising, and collects no information from visitors.
+</p>
+
+<h2>10. Changes to this policy</h2>
+<p>
+  Any change to this policy will be published on this page with an updated date at the top.
+</p>
+
+<h2>11. Contact</h2>
+<p>
+  Questions about this policy: <a href="mailto:rajeshsinghkadyan@gmail.com">rajeshsinghkadyan@gmail.com</a>
+</p>
+
+<footer>
+  <div>
+    <a href="index.html">Home</a>
+    <a href="terms.html">Terms of Service</a>
+    <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a>
+    <a href="http://www.google.com/policies/privacy">Google Privacy Policy</a>
+    <a href="https://myaccount.google.com/permissions">Revoke access</a>
+  </div>
+  <div class="yt">
+    <span class="ytfallback">YouTube</span>
+    <span>Powered by YouTube API Services</span>
+  </div>
+</footer>
+
+</div>
+</body>
+</html>

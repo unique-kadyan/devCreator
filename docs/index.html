@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DevCreator — animated short-story production tool</title>
+<link rel="icon" type="image/png" href="assets/logo-48.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="lockup">
+    <img src="assets/logo.png" alt="" width="56" height="56">
+    <h1>DevCreator</h1>
+  </div>
+  <p class="sub">A single-operator tool for producing and publishing original animated short stories.</p>
+  <nav style="margin-top:14px">
+    <a href="privacy.html">Privacy Policy</a>
+    <a href="terms.html">Terms of Service</a>
+  </nav>
+</header>
+
+<h2>What this is</h2>
+<p>
+  DevCreator is a private, self-hosted command-line application that produces original
+  animated short films and publishes them to a single YouTube channel owned and operated
+  by its sole operator. It is not a hosted service, a website, or a product offered to
+  other people. It has no user accounts, no sign-up, and no third-party users.
+</p>
+
+<div class="note">
+  <strong>There is exactly one user: the operator, who is also the owner of the YouTube
+  channel the application publishes to.</strong> The application runs locally on the
+  operator's own computer and authenticates only to the operator's own Google account.
+</div>
+
+<h2>How it uses YouTube API Services</h2>
+<p>
+  This application uses YouTube API Services. It calls the YouTube Data API v3 and the
+  YouTube Analytics API for the following purposes, and no others:
+</p>
+<table>
+  <tr><th>Purpose</th><th>API and method</th></tr>
+  <tr><td>Publish a finished video to the operator's own channel</td><td>Data API — <code>videos.insert</code></td></tr>
+  <tr><td>Attach a thumbnail to that video</td><td>Data API — <code>thumbnails.set</code></td></tr>
+  <tr><td>Attach a subtitle track to that video</td><td>Data API — <code>captions.insert</code></td></tr>
+  <tr><td>Read back public counters for the operator's own videos</td><td>Data API — <code>videos.list</code></td></tr>
+  <tr><td>Research existing topics to avoid duplicating them</td><td>Data API — <code>search.list</code></td></tr>
+  <tr><td>Read performance data for the operator's own channel</td><td>YouTube Analytics API — <code>reports.query</code></td></tr>
+</table>
+
+<h2>Automated publishing and the controls on it</h2>
+<p>
+  The application publishes automatically. Episodes are produced and uploaded to the
+  operator's own channel without a person approving each one, so the controls below are
+  stated plainly rather than left to a review step that does not happen.
+</p>
+<ul>
+  <li><strong>Volume is capped in configuration</strong> at three videos per week. The cap
+    is enforced by the application, not by convention.</li>
+  <li><strong>Every episode passes automated quality control before upload</strong>, and a
+    failure stops the upload rather than warning about it. The checks are mechanical:
+    integrated loudness and true peak, container duration against the audio timeline,
+    resolution and frame rate, subtitle presence, thumbnail presence, and the
+    synthetic-content disclosure.</li>
+  <li><strong>Topics are filtered before a story is written.</strong> Research draws on
+    public feeds, so candidates about real people coming to harm, real disasters, crime,
+    war or politics are rejected automatically and never become an episode. The rejection
+    reason is recorded against the topic.</li>
+  <li><strong>Titles are checked for accuracy.</strong> A title that does not describe what
+    the video contains, or that trips a clickbait filter, cannot be selected.</li>
+  <li><strong>Uploads are private by default</strong> and the audience declaration
+    (<code>selfDeclaredMadeForKids</code>) is explicit on every upload; the application
+    refuses to upload if it has not been set.</li>
+  <li><strong>A named operator is accountable</strong> for everything the channel
+    publishes, monitors it, and can stop the application at any time. Contact details are
+    below.</li>
+</ul>
+<p>
+  A local dashboard shows every episode, its quality-control report and its upload status,
+  and an episode can be rejected there before or after publication.
+</p>
+<p>
+  All artwork, characters, story and voice are original and generated for this channel.
+  Every description discloses that the content was produced with AI-assisted tools.
+</p>
+
+<h2>Contact</h2>
+<p>
+  For questions about this application or its use of YouTube API Services, contact the
+  operator at <a href="mailto:rajeshsinghkadyan@gmail.com">rajeshsinghkadyan@gmail.com</a>.
+</p>
+
+<footer>
+  <div>
+    <a href="privacy.html">Privacy Policy</a>
+    <a href="terms.html">Terms of Service</a>
+    <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a>
+    <a href="http://www.google.com/policies/privacy">Google Privacy Policy</a>
+  </div>
+  <div class="yt">
+    <!-- Text attribution rather than the YouTube mark. The image was never shipped, so
+         this was a guaranteed-failing request patched over by an onerror handler - a
+         fragile way to render a required attribution, and it breaks entirely with JS off.
+         YouTube's branding guidelines accept the wordmark in text. -->
+    <span class="ytfallback">YouTube</span>
+    <span>Powered by YouTube API Services</span>
+  </div>
+</footer>
+
+</div>
+</body>
+</html>
