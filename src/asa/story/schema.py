@@ -82,6 +82,56 @@ class StoryOutline(BaseModel):
     beat_signature: str
     cast: list[CastMember] = Field(min_length=1, max_length=5)
 
+    # ------------------------------------------------- real subject matter
+    #
+    # All three default to "nothing", because a fiction episode is still the common case and
+    # a required field here would fail every fox-opens-a-bakery story ever written. What
+    # they buy is that when an episode DOES assert something about the world, the assertion
+    # is written down as data before the script is drafted - so the scenes call can be
+    # handed the list and told not to exceed it, and so a human reviewing the episode can
+    # check the claims against a list rather than against the finished audio.
+    subject: str = Field(default="", max_length=120)
+    facts: list[str] = Field(default_factory=list, max_length=8)
+    # The era and place, for the IMAGE model rather than for the viewer. `channel.region_hint`
+    # pins every generation to contemporary India, which is right for the channel and wrong
+    # for Syracuse in 212 BC - it was putting Indian street furniture in ancient Greece. A
+    # non-empty period replaces that hint (art stage), so it must name the place as well as
+    # the time. Empty means present day, which is the overwhelming majority of episodes.
+    period: str = Field(default="", max_length=120)
+
+    @field_validator("facts")
+    @classmethod
+    def _facts_are_claims_not_topics(cls, v: list[str]) -> list[str]:
+        """A fact is a sentence that can be checked. "Archimedes" cannot be.
+
+        Cheap and mechanical on purpose - nothing here can verify that a claim is TRUE, and
+        pretending otherwise would be worse than not checking. What it does catch is the
+        model answering with the subject's keywords instead of with claims, which makes the
+        list useless for the two things it exists for: constraining the draft and letting a
+        reviewer audit the episode.
+        """
+        out = []
+        for raw in v:
+            claim = " ".join(str(raw).split())
+            if len(claim.split()) < 4:
+                raise ValueError(
+                    f"fact {claim!r} is a label, not a claim. Each entry in `facts` must be "
+                    f"a full statement that could be checked against a source.")
+            out.append(claim[:300])
+        return out
+
+    @model_validator(mode="after")
+    def _a_subject_needs_facts(self):
+        """An episode that names a real subject and lists nothing it claims about it has
+        put the whole burden of accuracy on prose nobody validated. Either it is about
+        something real - in which case say what it asserts - or it is fiction."""
+        if self.subject.strip() and not self.facts:
+            raise ValueError(
+                "`subject` names real subject matter but `facts` is empty. List every "
+                "claim the episode states as true (1-8 of them), or leave `subject` empty "
+                "and write it as fiction.")
+        return self
+
     @field_validator("beat_signature")
     @classmethod
     def _five_verbs(cls, v: str) -> str:

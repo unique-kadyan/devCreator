@@ -42,9 +42,11 @@ MIN_RUNTIME_RATIO = 0.75
 # already has a 1,800s budget.
 MAX_EXPANSION_PASSES = 3
 
-# A pass that adds less than this fraction of the target has plateaued; asking again just
-# spends calls to get the same length back.
-MIN_EXPANSION_GAIN = 0.08
+# A pass adding less than this fraction of the REMAINING gap has plateaued. Measured
+# against the remaining gap rather than the whole target: a 24 second gain on a 420 second
+# target is 6% of the goal but 7% of what was still missing early on, and treating it as a
+# plateau stopped the loop with the story at a quarter of its length.
+MIN_EXPANSION_GAIN = 0.05
 
 
 @dataclass
@@ -65,7 +67,7 @@ class GeneratedStory:
 class StoryGenerator:
     def __init__(self, chain: LLMChain, target_minutes: float = 7.0,
                  max_new_characters: int = 1, archetypes: list[str] | None = None,
-                 language: str = "en"):
+                 language: str = "en", subjects: list[str] | None = None):
         self.chain = chain
         self.target_minutes = target_minutes
         # Only the spoken text changes with language. Enum values, character ids and
@@ -76,6 +78,11 @@ class StoryGenerator:
         self.archetypes = archetypes or [
             "underdog", "trickster", "redemption", "mystery",
             "friendship", "survival", "comedy", "family"]
+        # The real-world domains this channel covers (`story.subjects`). Empty is a
+        # perfectly good configuration and means every episode is fiction - the subject
+        # block in the system prompt still forbids stating an invention as fact, so
+        # dropping this list loosens what is COVERED, never what may be claimed.
+        self.subjects = [s for s in (subjects or []) if str(s).strip()]
 
     # ---------------------------------------------------------------- helpers
 
@@ -180,7 +187,8 @@ class StoryGenerator:
             available_characters=available_characters, recent_signatures=recent_signatures,
             under_used=under_used, strategy_prefer=strategy_prefer,
             strategy_avoid=strategy_avoid, max_new_characters=budget,
-            archetypes=self.archetypes)
+            archetypes=self.archetypes, brief=getattr(self, "brief", ""),
+            subjects=self.subjects)
         known = {c["id"] for c in available_characters}
 
         def _check(o) -> None:
@@ -208,7 +216,8 @@ class StoryGenerator:
         return parsed, c, rep, P.sha(user)
 
     def draft(self, outline: StoryOutline) -> tuple:
-        user = P.draft_prompt(outline.model_dump_json(indent=None), self.target_minutes)
+        user = P.draft_prompt(outline.model_dump_json(indent=None), self.target_minutes,
+                              brief=getattr(self, "brief", ""))
         system = P.system_prompt(language=self.language)
         c = self.chain.complete(system, user, role="story", max_tokens=4096,
                                 temperature=0.95, structured=True)
@@ -231,7 +240,7 @@ class StoryGenerator:
             draft_json=json.dumps(draft)[:6000],
             cast=cast, existing_locations=existing_locations,
             sfx_library=sfx_library, style=P.block("style_bible"),
-            target_minutes=self.target_minutes)
+            target_minutes=self.target_minutes, brief=getattr(self, "brief", ""))
         if expand_from is not None:
             # Re-asking with the same prompt gets the same length back; the model has to be
             # told what it produced and by how much it missed.
@@ -351,8 +360,14 @@ class StoryGenerator:
     def generate(self, topic: str, keywords: list[str], available_characters: list[dict],
                  recent_signatures: list[str], existing_locations: list[str] | None = None,
                  sfx_library: list[str] | None = None, under_used: str = "",
-                 strategy_prefer: str = "", strategy_avoid: str = "") -> GeneratedStory:
-        log.info("story_start", topic=topic[:60])
+                 strategy_prefer: str = "", strategy_avoid: str = "",
+                 brief: str = "") -> GeneratedStory:
+        # Held on the instance rather than passed down: the brief is a property of the
+        # commission, and every one of the three calls below has to restate it (see
+        # prompts.brief_block). Threading it through each signature invites exactly the bug
+        # it exists to prevent - one call that forgets it.
+        self.brief = brief or ""
+        log.info("story_start", topic=topic[:60], brief_chars=len(self.brief))
         outline, c1, r1, h1 = self.outline(
             topic, keywords, available_characters, recent_signatures,
             under_used, strategy_prefer, strategy_avoid)
@@ -406,15 +421,30 @@ class StoryGenerator:
                             attempt=attempt, error=str(e)[:160])
                 break
             gained = self.estimated_runtime_s(expanded) - have_s
+            lost_scenes = len(scenes.scenes) - len(expanded.scenes)
             if gained <= 0:
                 log.warning("story_expansion_no_gain", attempt=attempt)
                 break
+            if lost_scenes > max(1, len(scenes.scenes) * 0.2):
+                # An "expansion" that returns FEWER scenes is a rewrite, not an expansion.
+                # A live run came back with 12 scenes from 26 - longer speeches in half the
+                # story - and the runtime check accepted it because seconds went up. The
+                # story lost structure: fewer beats, fewer locations, fewer cuts, and a
+                # camera sitting on one image for far longer.
+                log.warning("story_expansion_lost_scenes", attempt=attempt,
+                            had=len(scenes.scenes), got=len(expanded.scenes),
+                            gained_s=round(gained))
+                continue
             scenes, c3 = expanded, c3b
             have_s += gained
-            if gained < want_s * MIN_EXPANSION_GAIN:
-                # Diminishing returns: keep what this pass added, stop asking.
+            # Plateau is measured against what is STILL MISSING, not against the whole
+            # target. Against the target, a 24s gain on a 420s goal looked like a plateau
+            # and stopped the loop after one pass - while the story sat at 24% of length.
+            remaining = want_s - have_s
+            if remaining > 0 and gained < remaining * MIN_EXPANSION_GAIN:
                 log.info("story_expansion_plateaued", attempt=attempt,
-                         gained_s=round(gained), estimated_s=round(have_s))
+                         gained_s=round(gained), estimated_s=round(have_s),
+                         remaining_s=round(remaining))
                 break
 
         if want_s > 0 and have_s < want_s * MIN_RUNTIME_RATIO:

@@ -128,3 +128,34 @@ class TestEveryEnumFieldIsCoerced:
             kwargs[field] = given
             got = getattr(model(**kwargs), field)
             assert got == want, f"{model.__name__}.{field}: {given!r} -> {got!r}, want {want!r}"
+
+
+class TestCrossVocabularyWords:
+    """Models put emotion words in the gesture field.
+
+    A live run produced gesture="angry", "excited", "react_surprise" and "think". These are
+    not typos to reject - the model is describing a pose it has no word for. Falling
+    through to "idle" makes a furious character stand perfectly still, which is worse than
+    an approximate pose.
+    """
+
+    @pytest.mark.parametrize("given,want", [
+        ("angry", "point"), ("excited", "jump"), ("surprised", "react_shock"),
+        ("react_surprise", "react_shock"), ("sad", "react_sad"), ("think", "idle"),
+        ("happy", "laugh"), ("scared", "react_shock"),
+    ])
+    def test_emotion_words_map_to_a_physical_action(self, given, want):
+        from asa.story.schema import Staging
+        assert Staging(x=0.5, gesture=given).gesture == want
+
+    @pytest.mark.parametrize("given,want", [
+        ("relieved", "happy"), ("grateful", "happy"), ("desperate", "scared"),
+        ("defiant", "determined"), ("suspicious", "curious"), ("lonely", "sad"),
+    ])
+    def test_observed_emotion_misses_now_map(self, given, want):
+        assert _scene(emotion=given).emotion == want
+
+    def test_every_gesture_synonym_targets_a_real_gesture(self):
+        from asa.media.animation.shots import GESTURES, GESTURE_SYNONYMS
+        for src, dst in GESTURE_SYNONYMS.items():
+            assert dst in GESTURES, f"{src} -> {dst} is not a drawable gesture"

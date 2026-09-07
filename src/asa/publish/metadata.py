@@ -55,8 +55,21 @@ class Metadata:
 
 
 def metadata_prompt(story: dict, moral: str, cast: list[dict], minutes: float,
-                    channel: str) -> str:
+                    channel: str, language: str = "en") -> str:
     names = ", ".join(f"{c['name']} the {c['species']}" for c in cast)
+    # The metadata stage makes its OWN model call, so the language rule the story stage
+    # applies does not reach it. Without this the narration is Hindi and the title and
+    # description a viewer sees are English - which is what shipped on the first Hindi
+    # episode. Tags stay Latin deliberately: they are matched against search queries that
+    # are overwhelmingly typed in Latin script even for Hindi content.
+    language_rule = ""
+    if (language or "en").lower() == "hi":
+        language_rule = (
+            "WRITE THE title AND description IN HINDI (Devanagari script), in natural "
+            "conversational Hindi - this is what the viewer reads.\n"
+            "hashtags may be Hindi or English. tags must stay lowercase Latin script, "
+            "because search queries for Hindi content are typed in Latin more often than "
+            "in Devanagari.\n")
     return f"""Write publishing metadata for this finished animated short.
 
 CHANNEL: {channel}
@@ -80,6 +93,7 @@ Rules that are not negotiable:
   pipeline adds the channel's own recurring hashtags, so do not invent branding. A hashtag
   that does not match the video is a spam-policy problem, not a growth tactic.
 
+{language_rule}
 Return JSON:
 {{"titles": [{{"title": str, "scores": {{"clarity": 0-1, "curiosity": 0-1,
    "accuracy": 0-1}}, "accuracy_justification": str}}],
@@ -162,6 +176,22 @@ def clean_hashtags(*groups: list[str]) -> list[str]:
     return out
 
 
+def story_facts(story: dict) -> list[str]:
+    """The claims an episode states as true, from either shape of `story`.
+
+    `load_story` returns the DB row, where `facts` is the JSON text of a list; tests and
+    callers holding a freshly parsed outline pass the list itself. Accepting both is
+    cheaper than making every caller normalise, and getting it wrong here is expensive: an
+    episode whose facts silently read as empty publishes the WRONG disclosure, which is the
+    one failure this function exists to prevent.
+    """
+    from ..core.db import jload
+    value = story.get("facts")
+    if isinstance(value, str):
+        value = jload(value, [])
+    return [str(f).strip() for f in (value or []) if str(f).strip()]
+
+
 def build_description(story: dict, base: str, cast: list[dict], channel: str,
                       attribution: str, disclose_synthetic: bool,
                       hashtags: list[str], cta: str = "") -> str:
@@ -169,14 +199,35 @@ def build_description(story: dict, base: str, cast: list[dict], channel: str,
     names = ", ".join(f"{c['name']} the {c['species']}" for c in cast)
     if names:
         parts.append(f"Featuring {names}.")
+    # The claims, published. This is the audit trail from the outline's `facts` made public,
+    # and it goes ABOVE the synthetic disclosure because it is the more specific statement.
+    # Nothing in this pipeline can verify a claim is true - so the honest thing is to say
+    # plainly which sentences are being asserted, where a viewer can check them, rather than
+    # to bury them in seven minutes of narration.
+    facts = story_facts(story)
+    if facts:
+        subject = str(story.get("subject") or "").strip()
+        head = f"What is true in this episode ({subject}):" if subject \
+            else "What is true in this episode:"
+        parts.append(head + "\n" + "\n".join(f"- {f}" for f in facts))
     if disclose_synthetic:
         # Over-disclose deliberately. YouTube requires altered/synthetic disclosure for
         # realistic content; this is stylised animation, but saying so plainly costs
         # nothing and removes any question of concealment.
+        #
+        # The last sentence is CONDITIONAL, and it has to be. "All characters and events
+        # are fictional" is exactly right for a fox opening a bakery and is a false
+        # statement on an episode about how the Earth was first measured - a disclosure
+        # that is itself untrue is worse than no disclosure, because it is the sentence a
+        # viewer is being asked to rely on.
+        fictional = ("All characters and events are fictional." if not facts else
+                     "The animals, their names and their story are invented. The subject "
+                     "is not: the claims listed above are real, and any real people "
+                     "involved are credited rather than portrayed.")
         parts.append(
             "About this video: this is an original animated short. The story, artwork, "
             "character animation and voices were produced with AI-assisted tools and "
-            "reviewed before publishing. All characters and events are fictional.")
+            "reviewed before publishing. " + fictional)
     if attribution.strip():
         parts.append("Credits and licences:\n" + attribution.strip())
     if cta.strip():
@@ -239,9 +290,11 @@ def clean_tags(tags: list[str]) -> list[str]:
 def generate(chain, db: Path, job_id: int, story: dict, cast: list[dict], minutes: float,
              channel: str, attribution: str, disclose_synthetic: bool = True,
              lead_hashtags: list[str] | None = None,
-             evergreen_hashtags: list[str] | None = None, cta: str = "") -> Metadata:
-    user = metadata_prompt(story, story.get("moral", ""), cast, minutes, channel)
-    c = chain.complete(system_prompt(block("channel_bible")), user, role="cheap",
+             evergreen_hashtags: list[str] | None = None, cta: str = "",
+             language: str = "en") -> Metadata:
+    user = metadata_prompt(story, story.get("moral", ""), cast, minutes, channel, language)
+    c = chain.complete(system_prompt(block("channel_bible"), language=language), user,
+                       role="cheap",
                        max_tokens=2048, temperature=0.85, structured=True)
     draft = parse_model(c.text, MetadataDraft)
 

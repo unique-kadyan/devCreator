@@ -87,4 +87,5 @@ def _build_one(name: str, node: dict, cfg: Config, db: Path, quota: QuotaTracker
     return OpenAICompatProvider(
         name=name, base_url=node["base_url"], api_key=key, models=models,
         router=router, quota=quota, rpm=node.get("rpm"), rpd=node.get("rpd"),
-        extra_headers=node.get("headers") or {})
+        extra_headers=node.get("headers") or {},
+        force_temperature=node.get("force_temperature"))

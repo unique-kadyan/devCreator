@@ -9,7 +9,11 @@
    `shot`, `gesture`, `transition`, `emotion`) is an enum. The model picks from a list; it never
    invents a value the compositor can't render.
 3. **Composed from blocks**, so shared context is written once:
-   `SYSTEM = channel_bible + style_bible + safety_rules`, then a task block.
+   `SYSTEM = channel_bible + retention_bible + subject_bible + safety_rules`, then a task
+   block. The order
+   is load-bearing: the channel bible says what kind of story this is, the retention bible
+   says how it has to be built to be watched to the end, and safety_rules comes last
+   because it is the one block allowed to veto a craft rule.
 4. **Structured output validated by Pydantic**, with exactly one repair attempt carrying the
    validator error back in. Two failures = stage failure, not a silent bad script.
 5. **Negative constraints are data, not vibes.** The "avoid these plots" block is generated from
@@ -23,6 +27,8 @@
 prompts/
 ├── _blocks/
 │   ├── channel_bible.md      # audience, tone, values, what this channel is and is not
+│   ├── retention_bible.md    # how a short holds someone one thumb-flick from leaving
+│   ├── subject_bible.md      # what may be claimed when an episode is about something real
 │   ├── style_bible.md        # the visual style token block — also hashed into characters.style_hash
 │   ├── safety_rules.md       # originality + policy constraints, injected into every generative call
 │   └── vocab.md              # the closed enums, rendered into prompts programmatically
@@ -32,6 +38,54 @@ prompts/
 ├── thumbnail/ concepts.md  truthfulness_check.md
 └── qc/       safety_review.md  similarity_explain.md
 ```
+
+## `_blocks/retention_bible.md`
+
+Craft rules about the story itself: open on trouble rather than on setup, plant a concrete
+question and keep one open, escalate rather than repeat, land one honestly-planted turn,
+write short lines two characters can carry on a phone, and end on the best line rather than
+on a moral.
+
+**These are not permission to bait.** The block says so in its first paragraph, and the rest
+of the pipeline enforces it independently - `StoryOutline._no_clickbait` rejects a title
+with more than one ALL-CAPS word, `publish/metadata.score_title` gates on the same axis, and
+QC checks the thumbnail depicts something that actually happens. A story that wins the first
+five seconds and lies about the next five is worse than one nobody clicked.
+
+The outline and draft prompts restate the operative parts as requirements, because a rule
+that appears only in the system block has been through two summarisations by the time
+anyone writes dialogue - the same reason `brief_block` is repeated in all three calls.
+
+## `_blocks/subject_bible.md`
+
+What an episode may assert about the world, and how. Covers scientific discovery,
+invention and engineering, mathematics and astronomy, ancient technology, classical texts
+as historical and literary objects, and exploration.
+
+Included in **every** call rather than only for factual topics. Its first paragraph tells
+the model to ignore it for fiction, and the failure it guards - a model stating something
+as true in an episode nobody classified as factual - is exactly the case a conditional
+block would miss. `safety_rules` also refers to it by name, so the two ship together or the
+reference dangles.
+
+The three rules that carry the weight:
+
+* **Every claim is enumerated in the outline's `facts`.** Nothing not on that list may be
+  asserted as fact. `facts_block()` reprints the list at the top of the draft and scene
+  calls as a ceiling, for the same reason `brief_block` is repeated in all three: a
+  requirement that appears only in call one has been through two summarisations by the time
+  anyone writes dialogue.
+* **Real people are credited in narration and never cast.** `safety_rules`' no-real-person
+  rule is narrowed to exactly that and no further.
+* **Sacred texts are historical objects, not truth claims.** Composition, language, metre,
+  transmission and the scholarship are in; asserting, disputing or ranking beliefs is out,
+  as are deities as characters or images, ritual as instruction, and "the ancients already
+  knew modern physics".
+
+It also names the pseudo-history shapes explicitly - suppressed civilisations, ancient
+astronauts, lost superior technology, the lone genius - because they are the most viral
+framings in this genre and a positive instruction alone does not beat them. Same technique
+as naming "mascot" in the image negatives.
 
 ## `_blocks/safety_rules.md` (injected everywhere)
 

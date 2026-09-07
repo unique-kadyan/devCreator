@@ -11,7 +11,15 @@ import json
 import sqlite3
 from pathlib import Path
 
-COMMERCIAL_OK = {"CC0", "CC-BY", "YT-AUDIO-LIB", "PIXABAY", "APACHE-2.0", "OPENRAIL-PP-M"}
+COMMERCIAL_OK = {"CC0", "CC-BY", "YT-AUDIO-LIB", "PIXABAY", "APACHE-2.0", "OPENRAIL-PP-M",
+                 # SD 1.5 weights run locally. Commercial use is granted; the restrictions
+                 # it carries are on what may be generated, not on selling the output.
+                 # Separate from OPENRAIL-PP-M - see migrations/009.
+                 "CREATIVEML-OPENRAIL-M",
+                 # Not a grant - an accepted risk, recorded under its own code so the
+                 # ledger never claims a permission that was never given. See
+                 # migrations/008_pollinations_licence.sql.
+                 "POLLINATIONS-TOS-ACCEPTED"}
 NEEDS_ATTRIBUTION = {"CC-BY"}
 
 

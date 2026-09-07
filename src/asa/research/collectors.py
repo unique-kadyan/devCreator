@@ -134,7 +134,132 @@ def collect_rss(feeds: list[str] | None = None, per_feed: int = 8,
 
 # ------------------------------------------------------------------ Wikipedia
 
-_WIKI_PACE_S = 0.25
+# Raised from 0.25 after a live run: two Wikipedia collectors back to back at that pace
+# tripped the WMF throttle and the second one returned almost nothing. `SUBJECTS_PER_RUN`
+# does most of the work; this is the rest of it.
+_WIKI_PACE_S = 0.6
+
+
+def _wiki_summary(client: httpx.Client, title: str) -> dict | None:
+    """One REST summary, with the WMF's throttle respected. None means give up on this one.
+
+    Lifted out of `collect_wikipedia` unchanged when the subject collector arrived: the
+    retry, the exponential backoff on 429 and the pacing sleep are properties of being a
+    polite Wikipedia client, not of what the caller wants the article FOR, and a second
+    copy of them is a second thing to get wrong the next time the throttle tightens.
+    """
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+    for attempt in range(3):
+        try:
+            r = client.get(url)
+            if r.status_code == 429:
+                delay = 2 ** attempt + random.random()
+                log.warning("wikipedia_rate_limited", title=title,
+                            attempt=attempt + 1, delay_s=round(delay, 1))
+                time.sleep(delay)
+                continue
+            r.raise_for_status()
+            # The WMF asks clients to be contactable AND unhurried; pacing the loop is what
+            # stops a 20-seed run tripping the throttle in the first place.
+            time.sleep(_WIKI_PACE_S)
+            return r.json()
+        except httpx.HTTPError as e:
+            log.warning("wikipedia_failed", title=title, error=str(e)[:140])
+            return None
+    return None
+
+
+# The real subject matter this channel covers, as Wikipedia article titles. Curated rather
+# than discovered, and that is the point: a search-driven collector on "ancient science"
+# returns pseudo-archaeology within a page, and the pipeline would then have to argue with
+# it downstream. Every title here is a mainstream encyclopedia article about a thing that
+# demonstrably exists or demonstrably happened.
+#
+# Ordered by domain, and India-weighted for the same reason DEFAULT_FEEDS is: the audience
+# lives there, and `region_score` prefers it anyway.
+SUBJECT_SEEDS = [
+    # measurement, mathematics, astronomy
+    "Eratosthenes", "Euclid's_Elements", "Aryabhata", "Brahmagupta",
+    "Shulba_Sutras", "Bakhshali_manuscript", "Kerala_school_of_astronomy_and_mathematics",
+    "Hindu%E2%80%93Arabic_numeral_system", "Jantar_Mantar", "Astrolabe", "Sundial",
+    "Nine_Chapters_on_the_Mathematical_Art", "Antikythera_mechanism",
+    # engineering and materials
+    "Archimedes'_screw", "Roman_concrete", "Wootz_steel", "Iron_pillar_of_Delhi",
+    "Stepwell", "Qanat", "Aqueduct_(water_supply)", "Windmill", "Water_clock",
+    "Printing_press", "Movable_type", "Arch", "Rock-cut_architecture",
+    # optics, instruments, navigation
+    "Camera_obscura", "Lens_(optics)", "Telescope", "Microscope", "Compass",
+    "Marine_chronometer", "Dead_reckoning",
+    # the ancient world and its texts
+    "Indus_Valley_Civilisation", "Mohenjo-daro", "Cuneiform", "Rosetta_Stone",
+    "Papyrus", "Library_of_Alexandria", "Oral_tradition", "Rigveda", "Vedas",
+    "P%C4%81%E1%B9%87ini", "Sangam_literature", "Silk_Road", "Terracotta_Army",
+    # natural philosophy and the modern era
+    "Penicillin", "Voltaic_pile", "Transistor", "Photosynthesis", "Plate_tectonics",
+    "Deoxyribonucleic_acid", "Periodic_table",
+]
+
+
+# How many seeds one run actually fetches. MEASURED on the first live run: `wikipedia`
+# (16 animals) and `subjects` (53 titles) ran back to back and the WMF REST throttle
+# answered 429 to everything after the second subject - the collector degraded correctly
+# and returned 2 candidates out of 53, which is correct behaviour and a useless research
+# run.
+#
+# Sampling a rotating subset is better than raising the pace, and not only because it is
+# kinder: 53 titles fetched daily produce the same 53 topics deduped away every day, where
+# 12 sampled produce fresh ones and cover the list within a week anyway.
+SUBJECTS_PER_RUN = 12
+
+
+def collect_subjects(seeds: list[str] | None = None, timeout_s: float = 20.0,
+                     max_per_seed: int = 2,
+                     per_run: int = SUBJECTS_PER_RUN) -> list[Candidate]:
+    """Real subject matter - discoveries, inventions, ancient technology and texts.
+
+    Distinct from `collect_wikipedia`, which mines ANIMAL articles for behaviour to build a
+    fictional story around. This mines SUBJECT articles for something true that an episode
+    can be about, and marks the candidate `subject: 1.0` so the scorer knows the topic will
+    be scored on the wrong axes without help (see `scoring.SUBJECT_BONUS`).
+
+    The framing sentence matters more than it looks. "An animal story that explains: X"
+    tells the writer three things at once - that the cast is still animals, that X is the
+    subject rather than the setting, and that the episode's job is to make X understood.
+    The subject rules block in the system prompt does the rest.
+    """
+    seeds = list(seeds or SUBJECT_SEEDS)
+    if per_run and len(seeds) > per_run:
+        seeds = random.sample(seeds, per_run)
+    out: list[Candidate] = []
+    with httpx.Client(timeout=timeout_s, headers={"User-Agent": UA},
+                      follow_redirects=True) as client:
+        for title in seeds:
+            data = _wiki_summary(client, title)
+            if data is None:
+                # Same degradation as the animal collector: a throttle that has not cleared
+                # will not clear for the next seed either, so keep what was gathered.
+                if out:
+                    log.warning("subjects_partial", collected=len(out), stopped_at=title,
+                                of=len(seeds))
+                    break
+                continue
+            extract = (data.get("extract") or "").strip()
+            if not extract:
+                continue
+            sentences = [s.strip() for s in re.split(r"(?<=\.)\s+", extract) if s.strip()]
+            name = (data.get("title") or title.replace("_", " ")).strip()
+            for s in sentences[:max_per_seed]:
+                out.append(Candidate(
+                    topic=f"An animal story that explains: {s[:200]}",
+                    keywords=_keywords(f"{name} {s}"), source="wikipedia_subject",
+                    source_ref=data.get("content_urls", {}).get("desktop", {}).get("page"),
+                    # `factual` is what the animal collector already sets and means "this
+                    # sentence is true". `subject` is stronger and means "this EPISODE is
+                    # about a real thing", which is what unlocks the scoring bonus and is
+                    # deliberately not set by any collector that merely quotes a fact.
+                    signals={"factual": 1.0, "subject": 1.0}))
+    log.info("subjects_collected", n=len(out), seeds=len(seeds))
+    return out
 
 
 def collect_wikipedia(seeds: list[str] | None = None, timeout_s: float = 20.0
@@ -149,23 +274,7 @@ def collect_wikipedia(seeds: list[str] | None = None, timeout_s: float = 20.0
     with httpx.Client(timeout=timeout_s, headers={"User-Agent": UA},
                       follow_redirects=True) as client:
         for animal in seeds:
-            url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{animal}"
-            data = None
-            for attempt in range(3):
-                try:
-                    r = client.get(url)
-                    if r.status_code == 429:
-                        delay = 2 ** attempt + random.random()
-                        log.warning("wikipedia_rate_limited", animal=animal,
-                                    attempt=attempt + 1, delay_s=round(delay, 1))
-                        time.sleep(delay)
-                        continue
-                    r.raise_for_status()
-                    data = r.json()
-                    break
-                except httpx.HTTPError as e:
-                    log.warning("wikipedia_failed", animal=animal, error=str(e)[:140])
-                    break
+            data = _wiki_summary(client, animal)
             if data is None:
                 # Backoff did not clear it. Returning the summaries already gathered beats
                 # raising: research runs unattended, the remaining seeds would hit the same
@@ -176,9 +285,6 @@ def collect_wikipedia(seeds: list[str] | None = None, timeout_s: float = 20.0
                                 stopped_at=animal, of=len(seeds))
                     break
                 continue
-            # The WMF asks clients to be contactable AND unhurried; pacing the loop is what
-            # stops a 20-seed run tripping the throttle in the first place.
-            time.sleep(_WIKI_PACE_S)
             extract = (data.get("extract") or "").strip()
             if not extract:
                 continue
@@ -307,6 +413,9 @@ def collect_all(cfg, quota=None) -> list[Candidate]:
         sources.append(("rss", lambda: collect_rss(cfg.get("research.feeds"))))
     if "wikipedia" in enabled:
         sources.append(("wikipedia", collect_wikipedia))
+    if "subjects" in enabled:
+        sources.append(("subjects", lambda: collect_subjects(
+            cfg.get("research.subject_seeds"))))
     if "seasonal" in enabled:
         sources.append(("seasonal", collect_seasonal))
     if "youtube_search" in enabled:

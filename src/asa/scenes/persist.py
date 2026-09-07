@@ -23,13 +23,18 @@ def save_story(db: Path, gen, topic_id: int | None, cast_ids: list[str],
             INSERT INTO stories (topic_id, title, hook, logline, target_audience, genre,
                 archetype, moral, setting, beat_beginning, beat_conflict, beat_rising,
                 beat_climax, beat_resolution, ending, beat_signature, est_duration_s,
-                word_count, model_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                word_count, model_id, subject, facts, period)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (topic_id, o.title, o.hook, o.logline, o.target_audience, o.genre,
               o.archetype, o.moral, o.setting, o.beats.beginning, o.beats.conflict,
               o.beats.rising, o.beats.climax, o.beats.resolution, o.ending,
               o.beat_signature, est_duration_s, gen.word_count,
-              gen.model_ids.get("scenes") or gen.model_ids.get("outline")))
+              gen.model_ids.get("scenes") or gen.model_ids.get("outline"),
+              # Written even when empty, so "fiction, present day" is a recorded answer
+              # rather than an absent one. The art stage reads `period` to decide whether
+              # the channel's contemporary region hint applies, and cannot tell a story
+              # that never had a period from one whose period was lost.
+              o.subject, jdump(list(o.facts)), o.period))
         story_id = cur.lastrowid
         con.executemany(
             "INSERT OR IGNORE INTO story_cast (story_id, character_id, role) VALUES (?,?,?)",
@@ -102,7 +107,13 @@ def load_story(db: Path, story_id: int) -> dict:
             raise KeyError(f"story {story_id} not found")
         story = dict(row)
         story["cast"] = [dict(r) for r in con.execute(
-            "SELECT sc.character_id, sc.role, c.name, c.species, c.voice_id, "
+            # appearance / clothing / accessories are what the cinematic image prompt
+            # builds its one stable identity sentence from (media/images/scene_image.py
+            # character_look). Leaving them out of this SELECT is why every generated
+            # character was described only as "an anthropomorphic dhole, wearing simple
+            # everyday clothes" and changed colour, breed and outfit between shots.
+            "SELECT sc.character_id, sc.role, c.name, c.species, c.age_band, "
+            "       c.appearance, c.clothing, c.accessories, c.palette, c.voice_id, "
             "       c.voice_pitch_semi, c.voice_rate, c.puppet_dir "
             "FROM story_cast sc JOIN characters c ON c.id = sc.character_id "
             "WHERE sc.story_id = ?", (story_id,))]

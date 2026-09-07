@@ -20,7 +20,7 @@ to port cleanly (no SQLite-only constructs beyond `STRICT` and `datetime('now')`
 | `characters` | The permanent cast. `puppet_dir` + `rig_json` are the consistency guarantee |
 | `character_relationships` | Cross-character graph, feeds the story prompt |
 | `locations` | Reusable settings; background plates cache against these |
-| `stories` | One row per script, with the 5 beats as first-class columns + `beat_signature` for anti-repetition |
+| `stories` | One row per script, with the 5 beats as first-class columns + `beat_signature` for anti-repetition. `subject` / `facts` / `period` (010) record what an episode claims about the real world and when it is set — `facts` is the audit trail a reviewer checks and the description publishes; `period` is read by the art stage, in another process, to override `channel.region_hint` |
 | `story_cast` | Story ↔ character with role |
 | `scenes` | The animation contract. `duration_s` is authoritative (from audio), `duration_hint_s` is the LLM's guess |
 | `dialogue` | Per-line, per-character, so TTS and captions map 1:1 |

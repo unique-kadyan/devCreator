@@ -27,6 +27,10 @@ dependencies = [
 
 [project.optional-dependencies]
 align = ["faster-whisper"]
+# Local CPU diffusion (providers.image.local). Optional because it is a large install and
+# a multi-gigabyte checkpoint download, and the pipeline runs without it - the image chain
+# just skips the provider, exactly as it does for a missing API key.
+art = ["diffusers>=0.31", "accelerate", "safetensors"]
 dev = ["pytest", "pytest-cov", "ruff", "mypy"]
 
 [project.scripts]

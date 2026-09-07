@@ -76,6 +76,42 @@ def _black_seconds(video: Path, threshold: float = 0.10) -> float:
     return total
 
 
+def _placeholder_art(db: Path, scenes: list[dict]) -> list[str]:
+    """Scene images that came from the last-resort provider instead of a real one.
+
+    The procedural provider draws a flat vector room with nobody in it. It exists so that a
+    render at 3am degrades instead of dying, which is the right call - but it is a
+    placeholder, not a picture of the scene, and an episode built on them is not publishable.
+
+    This is not hypothetical. A burst of image-provider rate limits during one art stage put
+    placeholders into five of ten shots, and the finished ad played sixty seconds of empty
+    vector rooms over its own product reveal. Sixteen mechanical checks passed it: the
+    container was valid, the audio was in sync, the loudness was right, the licences were
+    clean. Nothing looked at what was in the frame.
+
+    `assets.path` is stored relative to the project root and upserted on conflict, so there
+    is exactly one row per file and it always names the provider that last wrote it - a
+    shot regenerated properly stops failing, without needing to know it ever failed.
+    """
+    plate = next((s["plate_path"] for s in scenes if s.get("plate_path")), None)
+    if not plate:
+        return []                      # puppet mode: no generated scene images to check
+    root = Path(db).resolve().parents[1]
+    folder = Path(plate).resolve().parent
+    found: list[str] = []
+    with read(db) as con:
+        for stored, source in con.execute(
+                "SELECT path, source FROM assets WHERE kind = 'scene_image'"):
+            if source != "procedural":
+                continue
+            full = Path(stored)
+            if not full.is_absolute():
+                full = root / full
+            if full.parent == folder and full.exists():
+                found.append(str(full))
+    return sorted(found)
+
+
 def run(db: Path, video: Path, *, expected_duration_s: float, srt: Path | None,
         thumbnail: Path | None, title: str, description: str, tags: list[str],
         story: dict, scenes: list[dict], target_lufs: float = -14.0,
@@ -100,6 +136,14 @@ def run(db: Path, video: Path, *, expected_duration_s: float, srt: Path | None,
                 f"{info['width']}x{info['height']} is not 1920x1080")
     if info["channels"] < 1:
         rep.add("audio.present", "fail", "no audio stream")
+
+    placeholders = _placeholder_art(db, scenes)
+    if placeholders:
+        rep.add("art.placeholder", "fail",
+                f"{len(placeholders)} scene image(s) are the empty placeholder the image "
+                f"chain falls back to when every real provider fails - those shots have no "
+                f"characters in them",
+                images=[Path(p).name for p in placeholders])
 
     drift = abs(info["duration"] - expected_duration_s)
     if drift > 1.5:

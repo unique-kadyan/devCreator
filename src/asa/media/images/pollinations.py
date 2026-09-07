@@ -20,10 +20,17 @@ from PIL import Image
 
 from ...core.errors import ProviderError, RateLimited
 from ...core.logging import get_logger
+from ...core.retry import RetryPolicy, with_retry
 from .base import GeneratedImage, prompt_key
 
 log = get_logger("img_pollinations")
 BASE = "https://image.pollinations.ai/prompt"
+
+# Short and cheap. This is a free shared endpoint, so an occasional 5xx is weather rather
+# than an outage, and generation itself only takes about four seconds - there is no point
+# backing off for a minute over it. Three attempts covers the observed case; if the service
+# is genuinely down, the chain still falls through to the placeholder as before.
+IMAGE_RETRY = RetryPolicy(attempts=3, base_delay_s=2.0, max_delay_s=10.0)
 
 
 class PollinationsImages:
@@ -50,17 +57,13 @@ class PollinationsImages:
         if seed is not None:
             params["seed"] = seed
         url = f"{BASE}/{urllib.parse.quote(prompt[:1400])}?{urllib.parse.urlencode(params)}"
-        try:
-            r = httpx.get(url, timeout=self.timeout_s,
-                          follow_redirects=True)
-        except httpx.HTTPError as e:
-            raise ProviderError(f"pollinations network error: {e}",
-                                provider=self.name) from e
-        if r.status_code == 429:
-            raise RateLimited("pollinations rate limited", provider=self.name,
-                              retry_after_s=float(r.headers.get("retry-after", 20)))
-        if r.status_code >= 400:
-            raise ProviderError(f"pollinations HTTP {r.status_code}", provider=self.name)
+        # Retried, because ONE transient 5xx here costs an entire episode. Measured on job
+        # 10: 62 of 63 stills generated cleanly and a single `HTTP 500` on scene 33 dropped
+        # that one frame to the procedural placeholder - which QC then failed the whole
+        # video for, correctly, after art, audio, render and assembly had all completed.
+        # A free keyless endpoint hiccups; the cost of asking again is four seconds.
+        r = with_retry(lambda: self._fetch(url), IMAGE_RETRY,
+                       label=f"pollinations:{key[:8]}")
 
         img = Image.open(io.BytesIO(r.content))
         if img.size != tuple(size):
@@ -70,3 +73,21 @@ class PollinationsImages:
         return GeneratedImage(path=out_path, provider=self.name,
                               model_id=f"pollinations/{self.model}", prompt_sha=key,
                               seed=seed, meta={"licence": "UNVERIFIED"})
+
+    def _fetch(self, url: str) -> httpx.Response:
+        """One attempt. Raises the class `with_retry` needs to decide what to do next."""
+        try:
+            r = httpx.get(url, timeout=self.timeout_s, follow_redirects=True)
+        except httpx.HTTPError as e:
+            raise ProviderError(f"pollinations network error: {e}",
+                                provider=self.name) from e
+        if r.status_code == 429:
+            raise RateLimited("pollinations rate limited", provider=self.name,
+                              retry_after_s=float(r.headers.get("retry-after", 20)))
+        if r.status_code >= 400:
+            # Retryable by default, which is what a 5xx from a free shared endpoint is.
+            # A 4xx other than 429 is a bad prompt or bad params and retrying will not fix
+            # it, so it is marked so and the chain advances immediately.
+            raise ProviderError(f"pollinations HTTP {r.status_code}", provider=self.name,
+                                retryable=r.status_code >= 500)
+        return r

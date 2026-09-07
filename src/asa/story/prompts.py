@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from functools import lru_cache
 from pathlib import Path
 
@@ -29,6 +30,10 @@ LANGUAGE_RULES = {
            "`location_id`, and every `visual_prompt`.\n"
            "- `visual_prompt` describes a picture for an image model that only understands "
            "English, so it must be English even though the story is Hindi.\n"
+           "- For the same reason, a `new_character_spec`'s `appearance`, `clothing` and "
+           "`accessories` must be ENGLISH. They are not spoken or shown; they are the one "
+           "sentence every image prompt reuses to keep a character looking like itself, "
+           "and an image model given Devanagari draws a different animal every shot.\n"
            "- Write Hindi as people actually speak it. Everyday Hindustani, not literary "
            "Sanskritised Hindi, and do not transliterate English sentences into "
            "Devanagari."),
@@ -40,7 +45,20 @@ def language_rules(language: str) -> str:
 
 
 def system_prompt(extra: str = "", language: str = "en") -> str:
-    parts = [block("channel_bible"), block("safety_rules")]
+    # Order is load-bearing. The channel bible says what kind of story this is; the
+    # retention bible says how it has to be built to be watched to the end; the subject
+    # bible says what is required when an episode asserts something about the real world;
+    # and safety_rules comes last because it overrides all three - it is the one block
+    # allowed to veto the others, and a model reading in order should hit the veto after
+    # the thing being vetoed. safety_rules refers to the subject block by name, so the two
+    # ship together or the reference dangles.
+    #
+    # subject_bible is included UNCONDITIONALLY rather than only for factual topics, and
+    # that is deliberate: its first paragraph tells the model to ignore it for fiction, and
+    # the failure it guards - a model stating something as true in an episode nobody
+    # classified as factual - is exactly the case a conditional block would miss.
+    parts = [block("channel_bible"), block("retention_bible"), block("subject_bible"),
+             block("safety_rules")]
     rules = language_rules(language)
     if rules:
         parts.append(rules)
@@ -90,10 +108,111 @@ def species_menu() -> str:
     return "\n".join(lines)
 
 
+def brief_block(brief: str) -> str:
+    """Turn a commissioning brief into instructions the story may not wander away from.
+
+    `topic` is a SEED. "A clever fox opens a village bakery" is a starting point, and a
+    model that develops it somewhere better has done its job - that latitude is why the
+    outline prompt is full of competing preferences (reuse this cast, prefer an under-used
+    archetype, match the animal to the setting).
+
+    A BRIEF is the opposite. Someone is paying for this episode to say a particular thing,
+    and a beautiful story that says something else is worthless. The first RoleVo ad written
+    through this pipeline came back without the product in it at all: the model read the
+    brief as a seed, kept the emotional shape, and replaced the product with generic advice.
+    Nothing was broken - the prompt had asked for a story, and it got one.
+
+    So a brief is stated as binding, placed first, and repeated in all three calls: the
+    outline, the draft and the scene breakdown each restate it, because a requirement that
+    only appears in call one has been through two summarisations by the time anyone writes
+    dialogue.
+    """
+    brief = (brief or "").strip()
+    if not brief:
+        return ""
+    return f"""BRIEF - BINDING REQUIREMENTS. This is not a seed to develop; it is a
+specification to satisfy. Where it conflicts with any preference stated later in this
+prompt - cast reuse, archetype variety, setting - THE BRIEF WINS.
+
+{brief}
+
+Rules for the brief:
+- Every named product, brand, character, place and plot point in it MUST appear in the
+  finished script. A version that omits one of them is a failed script, not a variation.
+- Write a brand or product name in Latin letters, spelled exactly as the brief spells it,
+  even when the rest of the script is in another script. Never transliterate it.
+- Use the resolution the brief specifies. Do not substitute a generic lesson for it.
+- Do not invent capabilities, statistics or promises for a product beyond what the brief
+  states. Understating is acceptable; inventing is not.
+
+"""
+
+
+def facts_block(outline_json: str) -> str:
+    """Restate an outline's real-world claims as a binding list for the later calls.
+
+    Same reasoning as `brief_block`, reached from a different direction: the outline JSON is
+    passed whole into the draft and scenes calls, so `facts` is technically already there -
+    buried in a field the model has no particular reason to treat as a constraint, several
+    thousand characters into a prompt about something else. A requirement that is merely
+    PRESENT is not a requirement. Pulled to the top and named, it is.
+
+    Reads the JSON rather than taking a StoryOutline, because both callers already hold the
+    serialised form and re-parsing it here keeps the prompt layer free of the schema.
+    """
+    try:
+        data = json.loads(outline_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    facts = [str(f) for f in (data.get("facts") or []) if str(f).strip()]
+    if not facts:
+        return ""
+    subject = str(data.get("subject") or "").strip()
+    listed = "\n".join(f"  {i}. {f}" for i, f in enumerate(facts, 1))
+    return f"""THIS EPISODE IS ABOUT SOMETHING REAL: {subject or '(see facts)'}
+
+These are the ONLY claims this episode may state as true. They are a ceiling, not a
+starting point:
+
+{listed}
+
+- Do not add a fact that is not on this list. Not a date, not a number, not a name, not a
+  place. If the story needs one and it is not here, write around it.
+- Do not contradict one either, including by simplifying it into something false.
+- Everything else in the episode is fiction and must read as fiction: the animals, their
+  names, their world, what they say and what happens to them.
+- Real people may be CREDITED by name in narration. They are never characters, never speak
+  and are never drawn.
+
+"""
+
+
+def subjects_block(subjects: list[str] | None) -> str:
+    """The real-world domains this channel covers, from `story.subjects`.
+
+    Advisory rather than binding, and phrased that way in the prompt: a seed topic that is
+    plainly fiction must not be dragged into a science lesson because a list of domains
+    appeared above it. What the list is FOR is the opposite case - a seed like "the
+    Antikythera mechanism" arriving from the subject collector, where the model needs to
+    know that treating it factually is wanted rather than a deviation.
+    """
+    subjects = [str(s).strip() for s in (subjects or []) if str(s).strip()]
+    if not subjects:
+        return ""
+    return (f"""
+REAL SUBJECT MATTER THIS CHANNEL COVERS - if, and only if, the seed topic is about one of
+these, write the episode as a factual one under the subject rules: fill `subject`, list
+every claim in `facts`, and set `period` when it is not present day.
+  {', '.join(subjects)}
+If the seed is plainly fiction, leave all three empty and write the story.
+""")
+
+
 def outline_prompt(topic: str, keywords: list[str], target_minutes: float,
                    available_characters: list[dict], recent_signatures: list[str],
                    under_used: str, strategy_prefer: str, strategy_avoid: str,
-                   max_new_characters: int, archetypes: list[str]) -> str:
+                   max_new_characters: int, archetypes: list[str],
+                   brief: str = "", subjects: list[str] | None = None) -> str:
     cast = "\n".join(
         f"- {c['id']} - {c['name']}, {c['species']}, {c['age_band']}. "
         f"{c['personality']} Voice: {c['voice_id']}."
@@ -101,7 +220,7 @@ def outline_prompt(topic: str, keywords: list[str], target_minutes: float,
     recent = "\n".join(f"- {s}" for s in recent_signatures) or "  (none yet)"
     return f"""Create the outline for ONE original animated short story.
 
-SEED TOPIC: {topic}
+{brief_block(brief)}SEED TOPIC: {topic}
 THEME KEYWORDS: {', '.join(keywords) or '(none)'}
 TARGET RUNTIME: {target_minutes:.1f} minutes (~{int(target_minutes * 150)} words of narration
 and dialogue combined)
@@ -124,6 +243,22 @@ PERFORMANCE SIGNAL from this channel's own analytics (advisory, not binding):
   avoid:  {strategy_avoid or '(no data yet)'}
 
 archetype must be one of: {archetypes}
+{subjects_block(subjects)}
+BEFORE YOU CHOOSE A PLOT, satisfy all five of these. A story that fails any one of them is
+a story nobody finishes, however well written the rest of it is:
+  1. The story opens ON the trouble. Name the exact moment it starts - not the situation
+     that led to it. `hook` is that moment, written as the thing a viewer sees and hears in
+     the first five seconds, not as a description of the premise.
+  2. There is one concrete question the opening plants and the ending answers. State it in
+     `logline` as a question a viewer would actually ask.
+  3. Each of the five beats costs the protagonist more than the one before it. If
+     `rising` is not visibly worse than `conflict`, replan it.
+  4. There is one honest TURN - something the audience believed that is revealed to be
+     wrong at or just before the climax, with its evidence planted in `beginning` or
+     `conflict`. Say what the turn is inside the `climax` beat.
+  5. The stakes are small, specific and human-sized: a job, a debt, a friendship, a
+     reputation, a promise. Save-the-world stakes cannot be paid off in
+     {target_minutes:.1f} minutes and read as empty when they are not.
 
 CASTING SHEET - choose species that fit the parts. `size` is relative on-screen height, so
 a 0.62 mouse really will stand knee-high to a 1.58 elephant:
@@ -147,6 +282,17 @@ Return JSON exactly matching this shape:
              "resolution": str}},
   "ending": str,
   "beat_signature": "verb|verb|verb|verb|verb",
+  "subject": str,          "" for fiction; otherwise the real thing this is about,
+                           e.g. "how the circumference of the Earth was first measured"
+  "facts": [str, ...],     [] for fiction; otherwise EVERY claim the episode states as
+                           true, 1-8 of them, each a full checkable sentence. A bare label
+                           like "Eratosthenes" is rejected. Only put here what you are
+                           confident is well established - a shorter honest list beats a
+                           longer one with a guess in it.
+  "period": str,           "" for present day; otherwise the era AND place, in English,
+                           for the image model: "Alexandria, 3rd century BC". This replaces
+                           the channel's contemporary setting hint, so it must name the
+                           place too or the pictures lose their location entirely.
   "cast": [{{"character_id": str|null, "role": "protagonist|antagonist|ally|mentor|comic_relief",
              "new_character_spec": null | {{
                "name": str, "species": one of
@@ -160,15 +306,33 @@ Return JSON exactly matching this shape:
 }}"""
 
 
-def draft_prompt(outline_json: str, target_minutes: float) -> str:
+def draft_prompt(outline_json: str, target_minutes: float, brief: str = "") -> str:
     return f"""Write the full script for this outline.
 
-OUTLINE:
+{brief_block(brief)}{facts_block(outline_json)}OUTLINE:
 {outline_json}
 
 Write {int(target_minutes * 150)} words total across narration and dialogue. Narration is
 third-person past tense and sparing - let dialogue and action carry the story. Every beat in
-the outline must appear. The first two sentences must be the hook.
+the outline must appear.
+
+THE OPENING, which is the only part most viewers will see:
+- The FIRST thing in `beginning` is a line of dialogue, spoken by a character reacting to
+  something that has already gone wrong. Not narration, not a description of the setting,
+  not a character stating their own name or job.
+- That line must name something concrete and specific - a number, an object, an
+  accusation, a deadline. Vague trouble is not trouble.
+- Nothing may be explained before it happens. Whatever the viewer needs to know arrives
+  afterwards, inside an argument about it.
+
+THROUGHOUT:
+- Keep every dialogue line under about twenty-five words. People interrupt and contradict;
+  they do not deliver paragraphs. Break a long speech across two characters.
+- At most three speaking characters in any one stretch of the story.
+- Never have a character say the moral. If the lesson is spoken aloud, cut the line - what
+  happens has to carry it.
+- The LAST line of `resolution` is the best line in the script: a decision, a reversal, or
+  a joke that pays off something planted in `beginning`.
 
 Return JSON: {{"beats": {{"beginning": str, "conflict": str, "rising": str, "climax": str,
 "resolution": str}}}} where each value is the prose for that beat, including dialogue written
@@ -177,11 +341,11 @@ inline as: NAME: "line"."""
 
 def scenes_prompt(story_json: str, draft_json: str, cast: list[dict],
                   existing_locations: list[str], sfx_library: list[str],
-                  style: str, target_minutes: float) -> str:
+                  style: str, target_minutes: float, brief: str = "") -> str:
     cast_ids = "\n".join(f"- {c['id']} ({c['name']}, {c['species']})" for c in cast)
     return f"""Break this story into scenes for a 2D cutout-animation pipeline.
 
-STORY: {story_json}
+{brief_block(brief)}{facts_block(story_json)}STORY: {story_json}
 
 SCRIPT: {draft_json}
 
@@ -203,6 +367,10 @@ VISUAL STYLE for every visual_prompt:
 Rules:
 - Aim for {max(4, int(target_minutes * 5))} scenes, 6-16 seconds each.
 - Scene 1 must land the hook within its first 3 seconds.
+- If this episode is about something real, anything the viewer must SEE to follow it - an
+  apparatus, a shadow, a gear train, a diagram scratched in the dirt, a tablet - has to be
+  in `action` and in `visual_prompt`. Those two fields are all the renderer reads; a
+  measurement that exists only in the narration happens off screen.
 - `visual_prompt` describes the LOCATION ONLY. Never describe a character - they are drawn
   from fixed assets and any description of them is discarded.
 - `location_id` is snake_case and stable: reuse the same id for the same place.

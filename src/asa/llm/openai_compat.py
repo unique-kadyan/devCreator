@@ -31,12 +31,19 @@ class OpenAICompatProvider:
                  router: ModelRouter | None = None, quota: QuotaTracker | None = None,
                  rpm: int | None = None, rpd: int | None = None,
                  timeout: float = 180.0, extra_headers: dict | None = None,
-                 auth_scheme: str = "Bearer"):
+                 auth_scheme: str = "Bearer", force_temperature: float | None = None):
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or ""
         self.models = [m for m in models if m]
         self.router = router
+        # Some routes accept exactly ONE temperature and reject everything else with a 400
+        # rather than clamping - Experiential Labs' Claude routes answer
+        # "Supported values are between 1.0 and 1.0" to the 0.9 this pipeline asks for, so
+        # every call fails validation before it ever reaches the model. Set this to the
+        # value the route demands and the caller's preference is overridden for this
+        # provider only; leave it None and the caller's temperature is passed through.
+        self.force_temperature = force_temperature
         self.quota = quota
         self.limits = Limits(rpm=rpm, rpd=rpd)
         self.timeout = timeout
@@ -102,6 +109,8 @@ class OpenAICompatProvider:
 
     def _call(self, model_id: str, system: str, user: str,
               max_tokens: int, temperature: float) -> Completion:
+        if self.force_temperature is not None:
+            temperature = self.force_temperature
         payload = {"model": model_id,
                    "messages": [{"role": "system", "content": system},
                                 {"role": "user", "content": user}],

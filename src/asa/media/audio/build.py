@@ -107,9 +107,18 @@ def synthesise_story(db: Path, tts, scenes: list[dict], cast: list[dict],
 def _record_audio(db: Path, scene_id: int, dialogue_id: int, utt: Utterance,
                   cid: str | None) -> None:
     with tx(db) as con:
+        # Upsert, not insert. The audio stage re-runs - after a crash, after a retry, after
+        # an edited line - and `context.load_audio` rebuilds every later stage's timeline
+        # from these rows. A second row for the same line does not look like an error
+        # anywhere; it just makes the scene twice as long.
         con.execute("""
             INSERT INTO audio (scene_id, dialogue_id, kind, character_id, path, duration_s,
                                provider, voice_id, text_sha256)
             VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(scene_id, dialogue_id) WHERE dialogue_id IS NOT NULL
+            DO UPDATE SET kind=excluded.kind, character_id=excluded.character_id,
+                          path=excluded.path, duration_s=excluded.duration_s,
+                          provider=excluded.provider, voice_id=excluded.voice_id,
+                          text_sha256=excluded.text_sha256
         """, (scene_id, dialogue_id, "narration" if cid is None else "dialogue", cid,
               str(utt.path), utt.duration_s, utt.provider, utt.voice_id, utt.text_sha256))

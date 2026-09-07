@@ -67,7 +67,7 @@ def build_tts_chain(cfg, language: str = "en"):
                 key = cfg.secret(node.get("api_key_env", "SARVAM_API_KEY"),
                                  required=False)
                 p = SarvamTTS(key, language=language,
-                              model=node.get("model", "bulbul:v2"))
+                              model=node.get("model", "bulbul:v3"))
                 if not p.available:
                     skipped.append(f"{name}(no key)")
                     continue

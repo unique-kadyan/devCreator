@@ -43,6 +43,12 @@ EMOTION_SYNONYMS = {
     "inquisitive": "curious", "puzzled": "curious", "confused": "curious",
     "thoughtful": "curious", "intrigued": "curious", "wondering": "curious",
     "sarcastic": "wry", "dry": "wry", "smug": "wry",
+    # Observed in a live run falling through to the default.
+    "relieved": "happy", "grateful": "happy", "warm": "happy", "fond": "happy",
+    "ashamed": "sad", "guilty": "sad", "lonely": "sad", "disappointed": "sad",
+    "desperate": "scared", "panicked": "scared", "uneasy": "scared",
+    "annoyed_frustrated": "angry", "indignant": "angry", "defiant": "determined",
+    "suspicious": "curious", "cautious": "curious", "uncertain": "curious",
 }
 GESTURE_SYNONYMS = {
     "nod": "talk", "speak": "talk", "speaking": "talk", "talking": "talk",
@@ -59,6 +65,19 @@ GESTURE_SYNONYMS = {
     "gasp": "react_shock", "startle": "react_shock",
     "sad": "react_sad", "droop": "react_sad", "slump": "react_sad", "cry": "react_sad",
     "laughing": "laugh", "chuckle": "laugh", "giggle": "laugh", "smile": "laugh",
+    # Models put EMOTION words in the gesture field - a live run produced "angry",
+    # "excited" and "relieved" as gestures. These are not typos to be rejected; the model
+    # is describing a pose it has no word for. Mapping them to the nearest physical action
+    # keeps the performance, where falling through to "idle" makes a furious character
+    # stand perfectly still.
+    "angry": "point", "furious": "point", "annoyed": "shrug", "confused": "shrug",
+    "excited": "jump", "happy": "laugh", "delighted": "laugh", "joyful": "laugh",
+    "surprised": "react_shock", "react_surprise": "react_shock",
+    "shocked": "react_shock", "afraid": "react_shock", "scared": "react_shock",
+    "sad": "react_sad", "crying": "react_sad", "upset": "react_sad",
+    "relieved": "idle", "calm": "idle", "neutral": "idle",
+    "think": "idle", "thinking": "idle", "ponder": "idle", "consider": "idle",
+    "curious": "point", "point_at": "point", "reach": "point", "grab": "point",
 }
 SHOT_SYNONYMS = {
     "closeup": "close_up", "close": "close_up", "cu": "close_up",

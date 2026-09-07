@@ -28,6 +28,16 @@ class GeneratedImage:
 
     @property
     def license_code(self) -> str:
+        # A provider's own declaration wins over the table. Every hosted provider here is
+        # one service running one licence, so the table says everything - but the local
+        # runner loads whatever checkpoint it is pointed at, and those differ: SSD-1B is
+        # Apache-2.0 and SD 1.5 is OpenRAIL-M. A single code keyed on the name "local"
+        # would have to be the laxest of them, which is how a non-commercial checkpoint
+        # ends up published under a permissive code. Still fail-closed: a provider that
+        # declares nothing falls to the table, and an unknown provider to UNKNOWN.
+        declared = str(self.meta.get("licence") or "").strip()
+        if declared:
+            return declared
         return LICENCE_BY_PROVIDER.get(self.provider, "UNKNOWN")
 
 
@@ -36,7 +46,18 @@ class GeneratedImage:
 LICENCE_BY_PROVIDER = {
     "procedural": "CC0",          # drawn by this repo's own code
     "huggingface": "APACHE-2.0",  # only Apache-2.0 / permissive models are configured
-    "pollinations": "UNKNOWN",    # terms do not clearly grant commercial reuse
+    # Terms still do not clearly grant commercial reuse. This code records that the
+    # operator read that and chose to publish anyway (migrations/008) - it is an accepted
+    # risk with a name, not a licence anyone granted. UNKNOWN stays fail-closed above it.
+    "pollinations": "POLLINATIONS-TOS-ACCEPTED",
+    # Diffusion run on this machine. The checkpoint decides the real code and the provider
+    # declares it per image (see `license_code` above); this entry is the floor for an
+    # older record that predates that field.
+    "local": "UNKNOWN",
+    # Metered hosted generation. Same reasoning as `local`: the account can be pointed at
+    # several models with different terms, so the real code is declared per image and this
+    # entry is only the fail-closed floor beneath it.
+    "replicate": "UNKNOWN",
 }
 
 

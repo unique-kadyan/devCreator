@@ -85,3 +85,39 @@ class TestIngest:
                 "SELECT status, reject_reason FROM research_topics").fetchone())
         assert row["status"] == "rejected"
         assert row["reject_reason"], "a silent drop is indistinguishable from a scoring miss"
+
+
+class TestRegionPreference:
+    """Local stories should be preferred, but not exclusively.
+
+    Adding Indian feeds put Indian stories in the candidate pool and nothing preferred them
+    once there - a Madagascar frog discovery still outscored stories about animals the
+    audience lives beside.
+    """
+
+    def test_indian_topics_score_above_zero(self):
+        from asa.research.scoring import region_score
+        for t in ("Striped hyenas help keep India clean",
+                  "Elephants in the Western Ghats find water in the dry season",
+                  "Langurs on a Jaipur rooftop"):
+            assert region_score(t) > 0, t
+
+    def test_unrelated_topics_score_zero(self):
+        from asa.research.scoring import region_score
+        assert region_score("Otters hold hands while sleeping") == 0.0
+        assert region_score("New frog species found in Madagascar") == 0.0
+
+    def test_the_bonus_is_a_nudge_not_a_filter(self):
+        # A genuinely strong non-local topic must still be able to win, or the channel
+        # can only ever cover one country.
+        from asa.research.scoring import REGION_BONUS
+        assert 0 < REGION_BONUS <= 0.2
+
+    def test_region_bonus_cannot_push_a_score_out_of_range(self):
+        from asa.research.collectors import Candidate
+        from asa.research.scoring import score_candidate
+        c = Candidate(topic="India Indian tiger elephant peacock monsoon Himalaya rescue "
+                            "lost friend home brave promise",
+                      keywords=["india", "tiger", "elephant"], primary_animal="tiger")
+        s = score_candidate(c, {}, {})
+        assert all(0.0 <= v <= 1.0 for v in s.values()), s

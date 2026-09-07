@@ -59,14 +59,24 @@ def order() -> list[str]:
 
 @stage("select_topic", "RESEARCHED", "TOPIC_SELECTED", "story")
 def select_topic(ctx, job: dict) -> dict:
-    from ..research.scoring import mark_used, select_next
+    from ..research.scoring import DEFAULT_MIN_SCORE, mark_used, near_miss, select_next
     if job.get("topic_id"):
         return {"topic_id": job["topic_id"]}
-    topic = select_next(ctx.db)
+    floor = float(ctx.cfg.get("research.min_score", DEFAULT_MIN_SCORE))
+    topic = select_next(ctx.db, min_score=floor)
     if topic is None:
+        # Say which of the two situations this is. "Nothing scores above the threshold"
+        # reads as an empty table and sends the operator to collect more, which does not
+        # help at all when the table is full and the floor is rejecting every row in it.
+        best = near_miss(ctx.db, min_score=floor)
+        detail = (f" The best rejected topic scores {best['overall_score']:.3f}: "
+                  f"{best['topic'][:90]!r}. Lower `research.min_score` below that to take "
+                  f"it - read what else sits under the floor first."
+                  if best else " The table holds no unused topics at all.")
         raise ValidationError(
-            "no unused research topic scores above the threshold. Run `asa research run` "
-            "to collect more, or queue one manually with `asa job new --topic ...`.")
+            f"no unused research topic scores at or above {floor:.2f}.{detail} "
+            f"Run `asa research` to collect more, or queue one manually with "
+            f"`asa job new --topic ...`.")
     mark_used(ctx.db, topic["id"])
     with tx(ctx.db) as con:
         con.execute("UPDATE jobs SET topic_id = ? WHERE id = ?", (topic["id"], job["id"]))
@@ -81,10 +91,14 @@ def generate_story(ctx, job: dict) -> dict:
     from ..story.generator import StoryGenerator
 
     with read(ctx.db) as con:
-        row = con.execute("SELECT topic, keywords FROM research_topics WHERE id = ?",
+        row = con.execute("SELECT topic, keywords, source FROM research_topics WHERE id = ?",
                           (job["topic_id"],)).fetchone()
     topic = row["topic"] if row else "an original animal story"
     keywords = json.loads(row["keywords"]) if row else []
+    # A collected topic is a seed to develop. A topic a person typed is a commission - an
+    # ad, a requested episode - and the script has to say what it says, so it is passed as
+    # a binding brief as well (story/prompts.brief_block).
+    brief = topic if (row and row["source"] == "manual") else ""
 
     prefer, avoid = prompt_hints(ctx.db)
     available = ctx.characters.existing()
@@ -92,13 +106,14 @@ def generate_story(ctx, job: dict) -> dict:
         ctx.llm, target_minutes=ctx.target_minutes,
         max_new_characters=int(ctx.cfg.get("story.max_new_characters_per_story", 2)),
         archetypes=ctx.cfg.get("story.archetypes"),
-        language=str(ctx.cfg.get("channel.language", "en")))
+        language=str(ctx.cfg.get("channel.language", "en")),
+        subjects=ctx.cfg.get("story.subjects"))
     story = gen.generate(
         topic=topic, keywords=keywords, available_characters=available,
         recent_signatures=recent_beat_signatures(ctx.db),
         existing_locations=_known_locations(ctx.db),
         sfx_library=ctx.sfx.tags() if hasattr(ctx.sfx, "tags") else [],
-        strategy_prefer=prefer, strategy_avoid=avoid)
+        strategy_prefer=prefer, strategy_avoid=avoid, brief=brief)
 
     # Characters must exist before the story row can reference them.
     cast_members, roles = [], {}
@@ -126,6 +141,17 @@ def _cinematic(ctx) -> bool:
     return str(ctx.cfg.get("production.render_mode", "puppet")).lower() == "cinematic"
 
 
+def _performance(ctx) -> bool:
+    """Whether cinematic scenes are cut into shots and performed, or held as one still.
+
+    Defaults ON. The one-still-per-scene behaviour it replaces is the reason a finished
+    episode read as a photograph with a voice-over, so it is kept only as an escape hatch
+    for debugging the image stage without paying for a shot list.
+    """
+    return _cinematic(ctx) and bool(
+        ctx.cfg.get("production.performance.enabled", True))
+
+
 @stage("art", "SCRIPT_GENERATED", "ART_READY", "art")
 def generate_art(ctx, job: dict) -> dict:
     from ..scenes.persist import load_scenes
@@ -147,32 +173,71 @@ def generate_art(ctx, job: dict) -> dict:
 
 
 def _generate_scene_images(ctx, job: dict, scenes: list[dict]) -> dict:
-    """One photorealistic frame per scene, characters and setting together.
+    """The pictures a cinematic episode is cut from.
 
-    Keyed per SCENE, not per location: two scenes in the same classroom are different
-    moments and need different images. That costs one image call per scene rather than one
-    per location, which the cache absorbs on re-runs.
+    With `production.performance.enabled` this buys one image per camera SETUP rather than
+    one per scene: a close-up of whoever is speaking, a reverse for whoever answers, a wide
+    for the narration. That is what lets the animate stage cut on every line instead of
+    holding one photograph for thirty seconds while voices play over it.
+
+    Several shots share a setup (`shotlist.image_key`), and the image cache is keyed by
+    prompt, so a six-line exchange between two characters cuts six times on two
+    generations. `max_images_per_scene` is the ceiling when a scene is unusually talkative.
     """
-    from ..media.images.scene_image import CINEMATIC_NEGATIVE, scene_prompt
+    from ..assemble.shot_render import generate_shot_images, shot_image_name
+    from ..assemble.shotlist import image_keys, plan_shots
+    from ..media.images.scene_image import (negative_for, period_hint, scene_prompt,
+                                            styled_for)
     from ..scenes.persist import load_story
     story = load_story(ctx.db, job["story_id"])
     cast_by_id = {c["character_id"]: c for c in story["cast"]}
     out_dir = ctx.paths_for(job["id"]).work / "scene_images"
-    region = ctx.cfg.get("channel.region_hint") or None
+    # Where and WHEN. A story that declared a period replaces the channel's contemporary
+    # region hint with it rather than adding to it: "set in India, Indian street furniture"
+    # and "Alexandria, 3rd century BC" cannot both be true, and an image model handed both
+    # averages them into a place that never existed.
+    region = period_hint(story.get("period")) or ctx.cfg.get("channel.region_hint") or None
+    if story.get("period"):
+        log.info("period_overrides_region_hint", story=job["story_id"],
+                 period=str(story["period"])[:80])
+    # None (key absent) keeps the module default; an explicit empty string in config is a
+    # deliberate "no grade", so `or None` would be wrong here.
+    look = ctx.cfg.get("channel.look_hint")
+    # The medium: `cartoon` or `photoreal`. It decides the subject clause AND the negative,
+    # which is why it is read once here and handed to every prompt this stage builds.
+    art_style = ctx.cfg.get("channel.art_style")
+    performance = _performance(ctx)
+    max_images = int(ctx.cfg.get("production.performance.max_images_per_scene", 6))
 
-    made = reused = 0
+    made = reused = shots = 0
     for sc in scenes:
-        kwargs = {"region_hint": region} if region else {}
-        prompt = scene_prompt(sc, cast_by_id, **kwargs)
-        plate = ctx.images.scene(sc["idx"], prompt, out_dir, CINEMATIC_NEGATIVE)
-        reused += int(plate.cached)
-        made += int(not plate.cached)
+        if performance:
+            result = generate_shot_images(ctx, sc, cast_by_id, out_dir,
+                                          max_images=max_images, region_hint=region,
+                                          look_hint=look, art_style=art_style)
+            made += result["generated"]
+            reused += result["cached"]
+            shots += result["shots"]
+            # `plate_path` keeps pointing at the scene's opening setup: it is what the rest
+            # of the pipeline means by "the picture of this scene".
+            first = image_keys(plan_shots(sc, max_images=max_images))[0]
+            plate_path = out_dir / shot_image_name(sc["idx"], first)
+        else:
+            kwargs = {"region_hint": region} if region else {}
+            prompt = scene_prompt(sc, cast_by_id,
+                                  style=styled_for(ctx.images.size, look, art_style),
+                                  **kwargs)
+            plate = ctx.images.scene(sc["idx"], prompt, out_dir, negative_for(art_style))
+            reused += int(plate.cached)
+            made += int(not plate.cached)
+            plate_path = plate.path
         with tx(ctx.db) as con:
             con.execute("UPDATE scenes SET status = 'art_ready', plate_path = ? "
-                        "WHERE id = ?", (str(plate.path), sc["id"]))
-    log.info("scene_images_ready", scenes=len(scenes), generated=made, cached=reused)
-    return {"mode": "cinematic", "scenes": len(scenes), "generated": made,
-            "cached": reused}
+                        "WHERE id = ?", (str(plate_path), sc["id"]))
+    log.info("scene_images_ready", scenes=len(scenes), shots=shots, generated=made,
+             cached=reused, mode="performance" if performance else "one_per_scene")
+    return {"mode": "cinematic", "scenes": len(scenes), "shots": shots,
+            "generated": made, "cached": reused}
 
 
 @stage("audio", "ART_READY", "AUDIO_READY", "voice")
@@ -188,6 +253,65 @@ def generate_audio(ctx, job: dict) -> dict:
         narrator_voice=ctx.cfg.get("providers.tts.kokoro_local.narrator_voice", "bm_fable"))
     ctx.cache_audio(job["id"], audio)
     return {"scenes": len(audio.scenes), "total_s": round(audio.total_s, 2)}
+
+
+def _animate_performance(ctx, job: dict, scenes: list[dict], audio) -> dict:
+    """Cut each scene into shots and perform them: the picture changes when the speaker does.
+
+    Two things are happening here, and both were missing before. The scene is CUT - a
+    close-up of whoever is talking, a reverse when someone answers, a wide under narration -
+    so the frame belongs to the voice on the soundtrack. And each shot is PERFORMED - jaw,
+    blink, head and camera driven by that speaker's own amplitude envelope - so the
+    character on screen is visibly the one speaking.
+
+    The scene clip remains the unit above this line: shots are concatenated into
+    `scenes.render_path` exactly as before, so the part planner, the audio bus and the
+    resume logic are untouched.
+    """
+    from ..assemble.shot_render import build_shot_jobs, render_scene_shots
+    from ..assemble.video import _sha
+    from ..media.video.factory import build_video_chain
+    from ..scenes.persist import load_story
+    # Loaded for the motion prompt, not for the pictures - those were bought at art time.
+    # A hosted model needs telling who is in the shot in the same words the image prompt
+    # used, or the fox it animates is not the fox that was drawn.
+    cast_by_id = {c["character_id"]: c for c in load_story(ctx.db, job["story_id"])["cast"]}
+    paths = ctx.paths_for(job["id"])
+    by_scene = {a.scene_id: a for a in audio.scenes}
+    out_dir = paths.scenes
+    shot_dir = out_dir / "shots"
+    image_dir = paths.work / "scene_images"
+    crf = int(ctx.cfg.get("production.crf", 20))
+    chain = build_video_chain(ctx.cfg, workers=ctx.cfg.get("production.render_workers"),
+                              crf=crf)
+    perf = "production.performance"
+    max_images = int(ctx.cfg.get(f"{perf}.max_images_per_scene", 6))
+    min_shot_s = float(ctx.cfg.get(f"{perf}.min_shot_s", 0.75))
+    max_shot_s = float(ctx.cfg.get(f"{perf}.max_shot_s", 6.5))
+
+    rendered, shots, total = 0, 0, 0.0
+    for sc in scenes:
+        sa = by_scene[sc["id"]]
+        dest = out_dir / f"scene_{sc['idx']:03d}.mp4"
+        total += sa.duration_s
+        if dest.exists() and sc.get("render_sha256") and _sha(dest) == sc["render_sha256"]:
+            log.info("scene_render_reused", scene=sc["idx"])
+            continue
+        jobs = build_shot_jobs(sc, sa.timing, image_dir, fps=ctx.fps,
+                               size=ctx.resolution, max_images=max_images,
+                               min_shot_s=min_shot_s, max_shot_s=max_shot_s,
+                               cast_by_id=cast_by_id,
+                               art_style=ctx.cfg.get("channel.art_style"))
+        stats = render_scene_shots(chain, jobs, sc["idx"], shot_dir, dest)
+        shots += stats["shots"]
+        with tx(ctx.db) as con:
+            con.execute("UPDATE scenes SET render_path = ?, render_sha256 = ?, "
+                        "status = 'rendered' WHERE id = ?",
+                        (str(dest), _sha(dest), sc["id"]))
+        log.info("scene_rendered", scene=sc["idx"], **stats)
+        rendered += 1
+    return {"mode": "performance", "scenes": len(scenes), "rendered": rendered,
+            "shots": shots, "seconds": round(total, 1)}
 
 
 def _animate_cinematic(ctx, job: dict, scenes: list[dict], audio) -> dict:
@@ -240,6 +364,8 @@ def animate(ctx, job: dict) -> dict:
     story = load_story(ctx.db, job["story_id"])
     scenes = load_scenes(ctx.db, job["story_id"])
     audio = ctx.load_audio(job["id"], scenes, story["cast"])
+    if _performance(ctx):
+        return _animate_performance(ctx, job, scenes, audio)
     if _cinematic(ctx):
         return _animate_cinematic(ctx, job, scenes, audio)
     cast_dirs = {c["character_id"]: ctx.assets / "characters" / c["character_id"]
@@ -344,10 +470,19 @@ def thumbnail(ctx, job: dict) -> dict:
         plate_scene = max(pool, key=lambda s: (
             float((s["staging"].get(hero["character_id"]) or {}).get("scale", 0)),
             s["idx"]))
-        plate = ctx.assets / "backgrounds" / plate_scene["location_id"] / "plate.png"
+        # Where the picture comes from depends on the render mode, and getting this wrong
+        # is why the thumbnail stage failed on every cinematic episode: it went looking for
+        # assets/backgrounds/<location>/plate.png, which only the puppet path ever writes.
+        # A cinematic episode's pictures are its generated scene frames - and they already
+        # contain the cast, so no puppet is composited over them.
+        if _cinematic(ctx):
+            plate = _cinematic_thumbnail_plate(ctx, job, plate_scene, hero)
+            puppet_dir = None
+        else:
+            plate = ctx.assets / "backgrounds" / plate_scene["location_id"] / "plate.png"
+            puppet_dir = ctx.assets / "characters" / hero["character_id"]
         suffix = "" if len(parts) == 1 else f"_part{v['part']}"
-        variants = generate_set(ctx.db, job["id"], plate,
-                                ctx.assets / "characters" / hero["character_id"],
+        variants = generate_set(ctx.db, job["id"], plate, puppet_dir,
                                 texts, paths.thumbs / suffix.lstrip("_") if suffix
                                 else paths.thumbs,
                                 variants=int(ctx.cfg.get("thumbnail.variants", 6)))
@@ -357,6 +492,25 @@ def thumbnail(ctx, job: dict) -> dict:
         out.append({"part": v["part"], "variants": len(variants),
                     "best": variants[0].score, "chosen": str(variants[0].path)})
     return {"parts": len(out), "thumbnails": out}
+
+
+def _cinematic_thumbnail_plate(ctx, job: dict, scene: dict, hero: dict) -> Path:
+    """The best generated frame of the protagonist for a thumbnail.
+
+    A close-up of the hero beats the scene's opening setup, which is often a wide
+    establishing shot under narration - a thumbnail of an empty street sells nothing. The
+    shot images already exist on disk, so this costs a directory lookup, and it falls back
+    to the scene's own frame when the scene has no close-up of them.
+    """
+    from ..assemble.shot_render import shot_image_name
+    from ..assemble.shotlist import plan_shots
+    image_dir = ctx.paths_for(job["id"]).work / "scene_images"
+    for shot in plan_shots(scene):
+        if shot.speaker == hero["character_id"] and shot.animates_face:
+            candidate = image_dir / shot_image_name(scene["idx"], shot.image_key)
+            if candidate.exists():
+                return candidate
+    return Path(scene["plate_path"] or "")
 
 
 @stage("metadata", "THUMBNAILED", "METADATA_READY", "story")
@@ -375,7 +529,8 @@ def metadata(ctx, job: dict) -> dict:
                     bool(ctx.cfg.get("channel.disclose_synthetic", True)),
                     lead_hashtags=ctx.cfg.get("channel.hashtags.lead", []) or [],
                     evergreen_hashtags=ctx.cfg.get("channel.hashtags.evergreen", []) or [],
-                    cta=ctx.cfg.get("channel.cta", "") or "")
+                    cta=ctx.cfg.get("channel.cta", "") or "",
+                    language=str(ctx.cfg.get("channel.language", "en")))
     ctx.cache_metadata(job["id"], meta)
     return {"title": meta.title, "tags": len(meta.tags),
             "hashtags": len(meta.hashtags),

@@ -133,7 +133,7 @@ def _rim_light(cut: Image.Image, colour=(255, 244, 214)) -> Image.Image:
     return out
 
 
-def render_variant(plate: Path, puppet_dir: Path, text: str, expression: str,
+def render_variant(plate: Path, puppet_dir: Path | None, text: str, expression: str,
                    layout: str, out_path: Path) -> ThumbVariant:
     w, h = SIZE
     with Image.open(plate) as im:
@@ -146,7 +146,10 @@ def render_variant(plate: Path, puppet_dir: Path, text: str, expression: str,
     canvas = bg.convert("RGBA")
 
     cx, cscale, band = LAYOUTS.get(layout, LAYOUTS["right_hero"])
-    cut = _character_cutout(puppet_dir, expression)
+    # `puppet_dir=None` means the plate already contains the character. That is the
+    # cinematic path: its frames are generated with the cast in them, so compositing the
+    # flat-vector puppet on top would put a cartoon fox in front of a photoreal one.
+    cut = _character_cutout(puppet_dir, expression) if puppet_dir is not None else None
     occupied = (0, 0)
     if cut is not None:
         target_h = int(h * 0.86 * cscale)
@@ -221,7 +224,7 @@ def _score(img: Image.Image, cut, lines: list[str], text: str) -> dict:
     }
 
 
-def generate_set(db: Path, job_id: int, plate: Path, puppet_dir: Path,
+def generate_set(db: Path, job_id: int, plate: Path, puppet_dir: Path | None,
                  texts: list[str], out_dir: Path, variants: int = 6) -> list[ThumbVariant]:
     combos = [(t, e, l) for t in texts
               for e, l in (("surprised", "right_hero"), ("determined", "left_hero"),

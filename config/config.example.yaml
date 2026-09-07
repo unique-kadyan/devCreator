@@ -14,6 +14,25 @@ channel:
   # street; the model has no idea where this channel is set.
   region_hint: "set in India, authentic Indian surroundings, Indian street furniture"
 
+  # THE MEDIUM. `cartoon` or `photoreal`, and it switches three things together in
+  # media/images/scene_image.py: what the subject is, how it is lit, and - the one that is
+  # easy to miss - the NEGATIVE prompt. The photoreal negative ends with "cartoon,
+  # illustration, drawing, anime, 3d render, cgi", so asking for a cartoon look while that
+  # negative is in force is a prompt arguing with itself, and the model settles the
+  # argument differently on every generation. That is art-style drift arriving from the
+  # opposite side to the one `_PUPPET_STYLE_WORDS` guards.
+  #
+  #   cartoon   - a modern 3D animated feature: stylised animal faces with large readable
+  #               eyes and a defined muzzle, bright high-key light, saturated colour. The
+  #               muzzle clause is not decoration - a lip-sync model needs a mouth it can
+  #               find, and the model's default for "cartoon fox" draws a dot.
+  #   photoreal - the low-key night film the channel was first tuned against. Keep
+  #               look_hint unset with this one; CINEMATIC_LOOK is that grade.
+  #
+  # `channel.look_hint` still overrides whichever preset's grade is in force, so the two
+  # are independent: preset chooses the medium, look_hint regrades it.
+  art_style: "cartoon"
+
   # Hashtags. Two YouTube behaviours drive the shape of this block:
   #   * only the FIRST THREE hashtags in the description render above the video title, so
   #     `lead` is what viewers actually see - keep it to three and make one of them the
@@ -41,11 +60,15 @@ channel:
 
 production:
   # How a scene becomes video.
-  #   cinematic - one photorealistic frame per scene from the image model, containing the
-  #               characters AND the setting, animated with a camera move. Matches the
-  #               anthropomorphic-animal look; there is no rig, so no lip-sync.
+  #   cinematic - generated frames from the image model containing the characters AND the
+  #               setting, cut into shots and performed. `channel.art_style` decides what
+  #               those frames LOOK like (cartoon or photoreal); this key only decides
+  #               where they come from. There is no rig, so lip-sync comes from
+  #               providers.video - a model trained on faces - or not at all.
   #   puppet    - the procedural rig: layered PNG characters composited onto an empty
-  #               background plate, with lip-sync, blinks and staging. Flat cartoon style.
+  #               background plate, with viseme lip-sync, blinks and staging. Flat 2D
+  #               cartoon, exact character consistency, no per-scene image credits, and it
+  #               ignores channel.art_style entirely - the puppets ARE the style.
   render_mode: "cinematic"
   # Multi-part release. A story is cut into videos of roughly this length, each published
   # as its own upload in a series playlist, because a viewer who finishes a part and finds
@@ -80,7 +103,7 @@ providers:
       # eighteen of them costs ~50s before the chain falls through. The providers ahead of
       # it have daily allowances one to three orders of magnitude larger, so on a normal
       # day the request is served before openrouter is ever tried.
-      chain: [groq_free, mistral_free, cohere_free, openrouter_free, gemini_free, cloudflare_free, huggingface, local_llamacpp]
+      chain: [explabs, groq_free, mistral_free, cohere_free, openrouter_free, gemini_free, cloudflare_free, huggingface, local_llamacpp]
   
       openrouter_free:
         base_url: "https://openrouter.ai/api/v1"
@@ -97,6 +120,52 @@ providers:
         max_tokens: 4096
         temperature: 0.9
   
+      explabs:
+        # Experiential Labs Platform API. OpenAI-compatible, so the generic branch in
+        # llm/factory._build_one serves it with no code change - base_url + api_key_env +
+        # models is the whole integration.
+        #
+        # FIRST IN THE CHAIN, and it is the only entry here that is not a free tier. The
+        # providers below are an eight-deep buffer of small free models, and a measured run
+        # spent ~13 minutes walking them: busy models, 429s, and schema failures that cost a
+        # repair call each. One frontier model with a 1M context should collapse that to a
+        # single call, which is worth paying for on a stage that runs once per episode.
+        #
+        # NOT SERVING YET (checked 2026-09-07). The key authenticates - /api/whoami returns
+        # org mostpleasure01 - but every completion answers:
+        #   429 {"code":"card_required","message":"Requires a card on file to spend platform
+        #        credits. Add one (no charge) at platform.experientiallabs.ai/credits"}
+        # Until that card is added this entry costs ONE wasted round trip per LLM call before
+        # the chain falls through to groq_free, which is a second or so on a stage that makes
+        # 3-6 calls. Set `enabled: false` to skip it entirely instead, or move it below
+        # local_llamacpp to keep it configured but last.
+        #
+        # It is a TEXT API only. It publishes no video route - /v1/videos and every variant
+        # answer "Unsupported serving path", and none of its 500 catalogue models is a video
+        # model - so it cannot appear in providers.video. Its eight image models are not
+        # reachable either: /v1/images/generations is an unsupported path.
+        enabled: true
+        base_url: "https://api.experientiallabs.ai/v1"
+        api_key_env: EXPLABS_API_KEY
+        models:
+          # Read off the live /api/models catalogue on this account 2026-09-07, not from
+          # docs. Ordered strongest-first; the ModelRouter walks them on failure.
+          - "claude-opus-5"
+          - "claude-sonnet-5"
+          - "claude-fable-5.1"
+        # REQUIRED for the Claude routes above. They accept exactly one temperature and
+        # answer 400 "Supported values are between 1.0 and 1.0" to anything else, including
+        # the 0.9 this pipeline asks for - so without this every Claude call fails validation
+        # before reaching the model. Verified per-model 2026-09-07: the Claude routes reject
+        # 0.9, and gemini/deepseek/glm/kimi/gpt routes accept it. Applies to the whole
+        # provider, which is why the model list here is Claude-only; the models that want 0.9
+        # are already served by gemini_free and groq_free below.
+        force_temperature: 1.0
+        # Unpublished for this account - these are deliberately conservative rather than
+        # guessed high, and should be raised once real usage shows the true ceiling.
+        rpm: 20
+        rpd: 500
+
       groq_free:
         # Verified 2026-09-01: 30 RPM / 6,000 TPM / 14,400 requests-per-day, no card.
         # 6k TPM is the real binder for long outputs, so Groq is best for `cheap` roles.
@@ -234,9 +303,30 @@ providers:
 research:
   schedule: "0 5 * * *"
   # reddit needs manual Reddit app approval (2-4 weeks) - enable it only once approved
-  collectors: [rss, wikipedia, seasonal, youtube_search]
+  collectors: [rss, wikipedia, subjects, seasonal, youtube_search]
   youtube_search_calls_per_day: 4   # 100 units each; unaudited cap is 100 calls/day
   candidates_per_run: 20
+
+  # The selection floor for `select_topic`. MEASURED, and it is the reason this key exists:
+  # on a live table of 306 collected topics the highest-scoring selectable one reached
+  # 0.347, so the default 0.35 rejected the whole pool and every episode on that install
+  # came from a hand-typed `asa job new --topic`.
+  #
+  # It is NOT lowered by default, because what sits immediately below the line is not just
+  # weaker material - at 0.347 the same table held "Wild elephant electrocuted in Chittoor
+  # district; Pawan Kalyan orders inquiry", a real news item naming a real politician. The
+  # `electrocuted` case is now caught by the safety filter; the general shape is not.
+  # Lower it deliberately, after reading the near-miss line `asa auto` prints, not to make
+  # the pipeline quieter.
+  min_score: 0.35
+
+  # Wikipedia article titles for the `subjects` collector. Omit the key to use the curated
+  # default list in research/collectors.py (SUBJECT_SEEDS) - roughly fifty mainstream
+  # articles across measurement, engineering, optics, the ancient world and its texts.
+  # Curated rather than searched on purpose: a search for "ancient science" returns
+  # pseudo-archaeology within a page, and the pipeline would then be arguing with its own
+  # research every episode.
+  # subject_seeds: ["Antikythera_mechanism", "Shulba_Sutras", "Iron_pillar_of_Delhi"]
   dedupe_threshold: 0.86
   weights:                          # tuned by analytics/feedback.py; edit freely
     trend: 0.15
@@ -255,6 +345,24 @@ story:
   max_new_characters_per_story: 2
   similarity_block: 0.90
   similarity_flag: 0.82
+
+  # REAL SUBJECT MATTER the channel covers. Advisory, not binding: it is shown to the writer
+  # so that a seed like "the Antikythera mechanism" is understood as something to treat
+  # factually rather than as a deviation. A seed that is plainly fiction is still written as
+  # fiction, and an empty list here means every episode is fiction.
+  #
+  # What it does NOT do is relax accuracy. `prompts/_blocks/subject_bible.md` applies to
+  # every episode whether or not this list exists: anything stated as true must be true,
+  # every claim must be listed in the outline's `facts`, real people are credited in
+  # narration and never cast, and ancient texts are covered as historical and literary
+  # objects with no religious claim made either way. Read that file before widening this.
+  subjects:
+    - "scientific discovery and how something came to be known"
+    - "invention and engineering, ancient and modern"
+    - "mathematics and astronomy, including their history"
+    - "ancient technology: metallurgy, irrigation, building, ships, dyes, medicine"
+    - "ancient and classical texts as historical and literary objects"
+    - "exploration, navigation and the natural world"
   archetypes: [underdog, trickster, redemption, mystery, friendship, survival, comedy, family]
 
 animation:

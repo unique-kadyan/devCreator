@@ -16,7 +16,7 @@ RESEARCHED → TOPIC_SELECTED → SCRIPT_GENERATED → CHARACTERS_READY → SCEN
 
 ## 1. Research (`asa.research`) — runs on its own schedule, not per-job
 
-Five independent collectors, each writing into `research_topics`. Any may fail without
+Six independent collectors, each writing into `research_topics`. Any may fail without
 blocking anything.
 
 | Collector | Signal produced | Cost |
@@ -26,6 +26,7 @@ blocking anything.
 | `wikipedia.py` | 60-day pageview curves for animal + theme articles | Free |
 | `reddit.py` | Top posts/comments from animal-story subreddits → theme vocabulary | Free tier, **but requires manual app approval (2–4 wks)** — ships disabled |
 | `seasonal.py` | Static calendar → upcoming hooks (back-to-school, winter, festivals) | Free, local |
+| `subjects` | Curated Wikipedia articles on discoveries, inventions, ancient technology and texts → topics an episode can be *about*. Marks `signals["subject"]`, which is what unlocks `SUBJECT_BONUS` in the scorer | Free |
 
 **YouTube quota budget (unaudited project = 100 `search.list`/day, 10,000 units/day shared):**
 
@@ -87,12 +88,30 @@ each response inside free-model context limits.
 
 | Call | Output | Approx tokens out |
 |---|---|---|
-| 1. **Outline** | title, hook, audience, genre, moral, setting, 5-beat arc, cast requirements | ~600 |
+| 1. **Outline** | title, hook, audience, genre, moral, setting, 5-beat arc, cast requirements, plus `subject` / `facts` / `period` when the episode is about something real | ~600 |
 | 2. **Draft** | full prose narration + dialogue per beat | ~2,000 |
 | 3. **Scene breakdown** | strict JSON scene list with the fields below | ~2,500 |
 
 All three are validated against Pydantic schemas (`story/schema.py`); a schema failure triggers
 one repair call with the validator error appended, then fails the stage.
+
+**What the outline call is required to establish**, beyond the fields themselves: the story
+opens *on* the trouble rather than on the setup that led to it; `logline` states the one
+concrete question the opening plants and the ending answers; each beat costs the protagonist
+more than the last; there is one turn whose evidence is planted in an earlier beat; and the
+stakes are human-sized, because save-the-world stakes cannot be paid off in the target
+runtime and read as empty when they are not. The draft call then constrains the opening
+specifically - the first thing in `beginning` is a line of dialogue reacting to something
+that has already gone wrong, not narration and not a character introducing themselves.
+See `prompts/_blocks/retention_bible.md` and `docs/04-PROMPTS.md`.
+
+**When the episode is about something real** the outline also carries `subject`, `facts`
+and `period`. `subject` without `facts` is a schema error, and each fact must be a full
+sentence rather than a label - the list is both the ceiling the later two calls are held to
+and the audit trail a reviewer checks. `period` is consumed by the ART stage, which runs in
+a different process, and replaces `channel.region_hint` for anything not set in the present
+day. The rules live in `prompts/_blocks/subject_bible.md`; the columns in
+`migrations/010_story_subject.sql`.
 
 ### Scene object (the contract everything downstream consumes)
 
@@ -302,6 +321,232 @@ it under-counted background resampling.
 Further speedups available if needed: cache background frames when the camera is static
 (already done), drop the world plate from 2688×1512 to 2304×1296, or render at 1600×900 and
 upscale on encode.
+
+### 8.4 The cinematic path: shots and a 2.5D performance
+
+Everything above describes the **puppet** renderer. `production.render_mode: cinematic`
+takes a different route: the image model generates photoreal frames with the characters
+already in them, because a procedural rig cannot reach the look this channel wants -
+anthropomorphic animals in real clothes, in Indian classrooms, streets and corridors.
+
+A generated still cannot be re-posed, which raises the question of what to do with it for
+the twenty seconds a scene lasts. The first implementation held it under a slow zoom, and
+that is what made finished episodes read as a photograph with a voice-over: nobody on
+screen was ever the person talking. `production.performance` replaces it with a shot layer
+and a warp layer.
+
+**The shot layer (`assemble/shotlist.py`).** A scene is cut into shots, one per run of lines
+by the same speaker. Cuts land in the silence between two lines, never on a line's first
+frame. Narration gets the wide, full and insert framings of the place and the action;
+speaking gets a tight framing of whoever is talking. Shots share generated images through
+`image_key`, so a six-line exchange between two characters cuts six times on two
+generations, capped by `max_images_per_scene`.
+
+`plan_shots` is a pure function of the scene's dialogue, because it runs twice: once in the
+art stage, which has no audio yet and needs to know which pictures to buy, and once in the
+animate stage, which has measured durations. `time_shots` is the only half that needs the
+audio. A shot's image is addressed by a hash of its `image_key`, so a missing file means
+exactly one thing - the art stage has not run - and says so.
+
+**The warp layer (`media/animation/performance.py`).** The same per-character RMS envelope
+that drives Tier A lip-sync above drives a 2.5D performance on the still: a muzzle-sized band
+is displaced about the mouth, the eye band squashes for a blink, the head drifts, the camera
+breathes.
+
+Read that as jaw motion, because that is what it is. **The local renderer does not do
+lip-sync and cannot be made to.** Displacing a region of a photograph translates a muzzle; it
+cannot part lips or show teeth, and it does not know where the mouth is (below). What it is
+for is that a held still should not look frozen.
+
+The whole warp is one primitive: a band redrawn from a source slice offset at its top and
+bottom edges is a linear vertical displacement field. A jaw is two of them - one carrying
+the chin down, one below it absorbing the motion so the chest does not slide - and a blink
+is one with a negative displacement at its lower edge. Both bands read from a copy taken
+before either wrote, or the lower one warps the upper one's output a second time and leaves
+a seam across the face.
+
+**Where the face is** (`media/animation/face.py`) comes from the prompt, not a detector. A
+speaking shot is generated from a composition string that names the head's edges, and the
+priors were measured off that output.
+
+This is the layer's weak point, and it has been measured rather than assumed. The framing
+word is only a location while the image model obeys it, and FLUX.1-schnell does not reliably
+obey it: in one finished episode a shot requested as a close-up of an owl came back as a wide
+two-shot of a rooftop, so the "mouth" was forty seconds of skyline. Every prior therefore
+carries a low `confidence` that scales the warp down, and the band is bounded on all four
+sides inside the head box. The earlier geometry ran from the eyes to below the frame across
+the full picture width; its frame-to-frame difference map was an edge map of the whole image,
+with the glasses, hoodie, laptop and background bookshelf all moving with the jaw. That is
+what "no lip movement, only frame flicking" was describing.
+
+Two rescues were tried and rejected, both empirically:
+
+* **A detector.** YuNet on twelve generated stills missed five, and on one preferred a human
+  in the background to the animal filling the frame. A real detector can still be dropped in
+  through the `.face.json` sidecar, at full confidence.
+* **Mouth-state pairs.** Generate the same shot twice on a fixed seed, once with the mouth
+  open and once closed, and cross-fade the mouth region. With FLUX.1-schnell, changing that
+  one clause at a fixed seed changed 63% of the pixels: the pair are two different pictures,
+  not two expressions of one.
+
+A third rescue is not available at all: **hands and legs.** There is no pose, limb or gesture
+concept anywhere on the local path - only a vertical displacement of a photograph - so no
+setting makes a character move an arm. It is not a tuning problem.
+
+What the two findings above have in common is that the local renderer is guessing where the
+face is. So it now declines to warp a box it cannot vouch for
+(`production.performance.min_face_confidence`, default 0.5). A prior rates itself 0.35 and a
+sidecar 1.0, so guesses render camera-only. Measured on a finished still: asked for a
+close-up of a fox, FLUX returned a seated two-thirds figure with its muzzle in the upper
+right; the prior put the muzzle band on the character's lap and the desk behind it, and the
+output tracked the voice at 0.995 correlation - on furniture, 10.2% of the frame, x
+0.37-0.64 and y 0.61-0.91, nowhere near the muzzle. Confidence scaling made that quieter,
+not absent. The floor gates blink and head drift too, since all three read the same
+rectangle.
+
+**Real lip-sync - and any gesture at all - is a hosted model** (`media/video/replicate.py`),
+which is the seam the shot layer was built for. The default speaking model is
+`bytedance/omni-human`: image plus audio to a whole-figure performance, so mouth, head,
+shoulders, arms and hands come out of one prediction. A talking-head model such as SadTalker
+solves only half of it - with `still_mode` on, where its artefacts live, the body is as
+frozen as it is locally, and a character explaining something for forty seconds never moves
+an arm. A provider answers per SHOT, not per episode - `accepts()` - because hosted video is
+billed by the second: the talking close-ups go to the hosted model, and the establishing
+wides go to the local renderer for free. On the measured episode that was 9 shots hosted out
+of 27.
+
+**Two axes of fallback, and both are needed.** The provider chain (`providers.video.chain`)
+ends at the local renderer; inside the Replicate provider, each mode has a chain of MODELS
+(`lipsync_fallbacks`, `i2v_fallbacks`) walked for one shot before the provider gives up.
+Without the second, a renamed slug or a prediction that choked on one image costs the shot
+its lip-sync and its gesture - everything the hosted call was for - when another hosted model
+was right there. The lipsync list is ordered by how much of the performance survives: whole
+figure (OmniHuman), whole figure directed by a prompt (Wan-S2V), a talking head with a frozen
+body (SadTalker), then the local camera move.
+
+Each entry carries its own `inputs`, `extra` and `durations`, held together in a `ModelSpec`,
+because every one of those is a property of the model: OmniHuman takes `image`/`audio` and
+rejects anything else, SadTalker calls the same two files `source_image`/`driven_audio` and
+needs `preprocess: full`, Kling's `duration` is an enum of two values and Wan has no duration
+field at all. A fallback list of bare slugs would inherit the primary's mapping and fail
+every prediction it was added to rescue.
+
+`QuotaExhausted` and `AuthError` do not walk the list - every slug on the account fails those
+identically, so walking it would spend the shot's wall clock to be told the same thing three
+times. Everything else advances, and if the whole list fails the error names every model
+tried, because "the hosted provider failed" without saying which three models and how is not
+a diagnosis. `asa video preflight` checks every model in every chain for the same reason.
+
+**The provider chain is several free allowances, not one paid account.** Each hosted entry
+is a separate service with its own signup credit, and `QuotaExhausted` advancing the chain is
+what turns "the allowance ran out" from an episode-wide downgrade into a per-shot hop to the
+next account. `AuthError` advances it as well, which it did not used to: aborting the episode
+over one revoked key made sense when there was a single hosted provider and the alternative
+was a silent downgrade, and stopped making sense the moment there were three.
+
+Everything that is not a service's HTTP dialect lives in `hosted.HostedShotProvider` - the
+spend policy, the model chain, the credit latch, the frame-count conform - and Replicate is
+one subclass of it. The others are `Service` profiles: fal answers with a `status_url` to
+poll and a separate `response_url` to collect the clip from, WaveSpeed wraps everything in
+`data` and builds its poll URL from an id, and WaveSpeed will not take a data URI so its
+profile names an upload endpoint instead. That is a difference in JSON paths, not behaviour,
+so a new service is a table entry rather than a module.
+
+Six services sit in that table now, and the shape of the difference between them is worth
+stating once: `fal`, `wavespeed`, `dashscope`, `novita` and `siliconflow` are all serving
+Wan, because Wan is open weights and hosts therefore compete on it. So the provider chain
+buys separate free allowances and a newer model version, not five different looks. The
+version is the part that matters - Novita's `wan2.7-i2v` against everyone else's 2.2 - and
+the reason it is not first in the chain is that its audio-driven path is unproven and fails
+in the one way nothing downstream can catch: a fluent performance of the wrong words, on a
+clip that is never retimed. Prove it on one shot, then promote it.
+
+**The first-party APIs stretched the profile in one direction the resellers did not.** fal
+and WaveSpeed name the model in the URL and take our mapped fields as the whole body.
+DashScope and Google post to one fixed route, name the model in the body, and want those
+fields inside an envelope - so `Service` also carries `submit_path`, `model_field` and
+`input_path`, and `wire_body` reshapes the flat mapping on the way out. Two conventions do
+the rest of that work without a profile field per case: a **dotted** target name in a mapping
+(`duration: parameters.durationSeconds`) is placed at the root of the request rather than in
+the input envelope, which is how DashScope's `parameters` and Google's are reached from
+config; and `asset_object` turns every data URI in the body into the `{bytesBase64Encoded,
+mimeType}` object Google insists on. All of it is inert on a profile that does not ask for
+it, which is what keeps the reseller bodies byte-identical to what they were before.
+
+Polling stretched it once more. Most services serve the job AT a URL - handed over, or
+built from an id - and SiliconFlow instead POSTs the id to one fixed `/video/status` route,
+so `poll_method` and `poll_body_field` exist and the submitted id is carried as far as the
+poll rather than being baked into a URL on the way. Novita puts the id in a query string,
+which the same `poll_template` covers with no new field at all.
+
+Google is the awkward one, and worth reading before enabling: the model is in the path but
+with a `:predictLongRunning` suffix, the key is not a Bearer token, the input is a batch of
+one, completion is a boolean rather than a status string, and the finished clip lives behind
+the same key as the API - an anonymous GET is answered 401, which arrives as a corrupt mp4
+rather than as an error. Six profile fields, one per hazard. The seventh is not a field at
+all: **Veo has no audio-driven mode**, so a Google entry configures `i2v_model` and leaves
+`lipsync_model` empty, and a mode with no model configured now contributes no `ModelSpec` and
+is declined in `accepts` - before that, the empty string went out as a slug and every
+speaking shot spent its wall clock reaching a 404.
+
+Free allowances are sized for evaluation. Together they are a handful of clips against a
+target of four videos a day, and the honest reading of this chain is that it removes the
+cliff at the end of one allowance, not the per-second cost of hosted video.
+
+**An account that cannot pay is asked once.** Learning it costs a full `CREATE_RETRY` cycle -
+five attempts, about three and a half minutes of measured backoff - because an uncredited
+account is throttled to a trickle and answers 429 to the very retries trying to reach the
+honest 402. That is a fair price once and not twelve times: the chain is built once per
+animate stage and the provider instance is reused, so before the latch a twelve-speaking-shot
+episode spent forty minutes being told the same thing and fell back to the local renderer
+every time anyway. Anything a hosted model returns is forced through
+`media/video/conform.py` to exactly `frames` frames at `fps` and `size`, because clips are
+stream-copy concatenated against an audio timeline and a clip half a frame long walks the
+whole episode out of sync while remaining a perfectly valid file. Lip-synced clips are
+trimmed or clone-padded, never retimed; image-to-video clips are retimed, so a model that
+only emits five-second clips does not get to dictate the edit.
+
+Model slugs are config, not code (`providers.video.replicate.*_model`, with `*_inputs`
+mapping our fields onto the model's parameter names), because hosted catalogues churn and a
+wrong slug baked into code would fail every shot at 3am. That extends to the prompt: the
+audio-driven models split on it - OmniHuman's schema is exactly image and audio and it
+rejects anything else, while Wan-S2V *requires* a prompt and rejects the prediction without
+one - so the lipsync payload sends `motion_prompt` only when the mapping declares a prompt
+field, and swapping between the two is three lines of config. `asa video preflight` checks the
+configured models against the live catalogue - auth, slug resolution, input mappings, extras
+and required inputs - without creating a prediction, so it is free to run and worth running
+after any long gap.
+
+Two classes of defect live here and neither is visible from the code, which is why the
+preflight exists: an input that is an **enum** rather than the number it looks like (Kling's
+`duration` accepts 5 or 10 and rejects everything else, so a 4.5-second shot asking for 4
+fails the whole prediction - we ask for the shortest offered length that covers the shot and
+let the conformer retime), and a **default that quietly discards our work** (SadTalker's
+`preprocess` defaults to `crop`, which throws away the composed frame and returns a bare head
+at its own scale; cut against the local shots either side it reads as a different film).
+
+Extras are kept apart per mode - Replicate validates against the chosen model's schema and
+rejects unknown fields, so one shared bag posts SadTalker's `preprocess` to Kling.
+
+**A shot is driven by its own slice of the voice.** A long speech is covered by several
+setups, and they all carry the same line index; handing each the whole wav and trimming the
+returned video afterwards would sync every part to the line's opening words - a mouth moving
+convincingly and saying the wrong thing, which is worse than one that does not move.
+`ShotJob.voice_offset_s` / `voice_duration_s` carry the window and the provider cuts it.
+
+**Long speeches.** A speech longer than `PLAN_SHOT_S` is planned as up to `MAX_PARTS`
+*different* setups, not one picture under several camera moves. The split has to happen in
+`plan_shots`, which has no audio, so it is estimated from word count at a measured 2.3 w/s;
+`time_shots` then divides the speech's real span between the parts. This is what the previous
+`_split_long` got wrong - its sub-shots shared the parent's image - and it left 52% of a
+finished episode resting on a still. On that episode the change took the longest unbroken
+hold on one picture from 39.8 s to 10.3 s, and the shot count from 19 to 27, for two extra
+image generations. The framing rotations must contain no repeats, or two adjacent parts
+resolve to the same `image_key` and merge back into one long hold.
+
+**Cost.** About 45 ms/frame at 1080p on 6 workers for the local renderer - roughly realtime.
+Images, not compute, are the constraint: a scene costs one generation per distinct camera
+setup, capped by `max_images_per_scene`.
 
 ---
 

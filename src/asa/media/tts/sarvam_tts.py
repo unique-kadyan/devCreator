@@ -28,10 +28,22 @@ log = get_logger("sarvam_tts")
 ENDPOINT = "https://api.sarvam.ai/text-to-speech"
 SAMPLE_RATE = 22_050
 
-# bulbul:v2 speakers. Grouped by gender so casting can honour a character's presentation
-# the same way the Kokoro pool does.
-FEMALE = ["anushka", "manisha", "vidya", "arya"]
-MALE = ["abhilash", "karun", "hitesh"]
+# bulbul:v3 speakers, grouped so casting can honour a character's presentation the same way
+# the Kokoro pool does.
+#
+# v2 was retired server-side and v3 did NOT keep the old names - every speaker in the v2 list
+# (anushka, manisha, vidya, arya, abhilash, karun, hitesh) is rejected by v3. So bumping the
+# model string alone fails every line with "speaker not compatible", which is a second
+# outage wearing the first one's clothes. The roster below is what the API itself lists.
+#
+# The grouping is inferred from the names, not from listening to all thirty-seven. If a
+# character is cast against its presentation, move the name rather than assuming the API
+# changed.
+FEMALE = ["ritu", "priya", "neha", "pooja", "simran", "kavya", "ishita", "shreya",
+          "roopa", "tanya", "shruti", "suhani", "kavitha", "rupali"]
+MALE = ["aditya", "ashutosh", "rahul", "rohan", "amit", "dev", "ratan", "varun",
+        "manan", "sumit", "kabir", "aayan", "shubh", "advait", "anand", "tarun",
+        "sunny", "mani", "gokul", "vijay", "mohit", "rehan", "soham"]
 SPEAKERS = FEMALE + MALE
 
 LANG_CODES = {"hi": "hi-IN", "en": "en-IN", "bn": "bn-IN", "ta": "ta-IN",
@@ -44,7 +56,7 @@ class SarvamTTS:
     sample_rate = SAMPLE_RATE
 
     def __init__(self, api_key: str, language: str = "hi",
-                 model: str = "bulbul:v2", timeout: float = 60.0):
+                 model: str = "bulbul:v3", timeout: float = 60.0):
         self.api_key = (api_key or "").strip()
         self.language = LANG_CODES.get((language or "hi").lower(), "hi-IN")
         self.model = model
